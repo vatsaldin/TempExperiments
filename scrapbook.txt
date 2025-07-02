@@ -1,0 +1,207 @@
+import pandas as pd
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import IntegrityError
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def insert_compliance_data_from_csv(csv_file_path, database_url):
+    """
+    Read CSV file and insert compliance role and requirement data into database
+    
+    Args:
+        csv_file_path (str): Path to the CSV file
+        database_url (str): SQLAlchemy database URL (e.g., 'sqlite:///example.db')
+    """
+    
+    # Create database engine and session
+    engine = create_engine(database_url)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    
+    try:
+        # Read CSV file
+        df = pd.read_csv(csv_file_path)
+        
+        # Clean column names (remove extra spaces)
+        df.columns = df.columns.str.strip()
+        
+        # Display CSV info
+        logger.info(f"CSV file loaded with {len(df)} rows")
+        logger.info(f"Columns: {list(df.columns)}")
+        
+        # Process each row
+        for index, row in df.iterrows():
+            try:
+                # Extract data from CSV row
+                role_name = row['ROLE_NAME'].strip() if pd.notna(row['ROLE_NAME']) else None
+                compliance_req_id = str(row['COMPLIANCE_REQUIREMENT_ID']).strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_ID']) else None
+                compliance_req_name = row['COMPLIANCE_REQUIREMENT_NAME'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_NAME']) else None
+                
+                # Check for missing essential data and raise ValueError
+                missing_fields = []
+                if not role_name:
+                    missing_fields.append("ROLE_NAME")
+                if not compliance_req_name:
+                    missing_fields.append("COMPLIANCE_REQUIREMENT_NAME")
+                if not compliance_req_id:
+                    missing_fields.append("COMPLIANCE_REQUIREMENT_ID")
+                
+                if missing_fields:
+                    raise ValueError(f"Row {index + 1}: Missing required fields: {', '.join(missing_fields)}")
+                
+                # Find existing ComplianceRole (do not create if not found)
+                stmt = select(ComplianceRole).where(ComplianceRole.name == role_name)
+                compliance_role = session.execute(stmt).scalar_one_or_none()
+                
+                if not compliance_role:
+                    raise ValueError(f"Row {index + 1}: ComplianceRole '{role_name}' not found in database")
+                
+                # Check if ComplianceRequirement already exists
+                stmt = select(ComplianceRequirement).where(ComplianceRequirement.snowflake_req_id == compliance_req_id)
+                existing_requirement = session.execute(stmt).scalar_one_or_none()
+                
+                if not existing_requirement:
+                    # Create new compliance requirement
+                    compliance_requirement = ComplianceRequirement(
+                        name=compliance_req_name,
+                        snowflake_req_id=compliance_req_id,
+                        compliance_role_id=compliance_role.id
+                    )
+                    session.add(compliance_requirement)
+                    logger.info(f"Created new compliance requirement: {compliance_req_name}")
+                else:
+                    # Update existing requirement if needed
+                    if existing_requirement.name != compliance_req_name:
+                        existing_requirement.name = compliance_req_name
+                        logger.info(f"Updated compliance requirement name: {compliance_req_name}")
+                    
+                    if existing_requirement.compliance_role_id != compliance_role.id:
+                        existing_requirement.compliance_role_id = compliance_role.id
+                        logger.info(f"Updated compliance requirement role association")
+                
+            except Exception as e:
+                logger.error(f"Error processing row {index + 1}: {str(e)}")
+                continue
+        
+        # Commit all changes
+        session.commit()
+        logger.info("Successfully inserted/updated all data")
+        
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error processing CSV file: {str(e)}")
+        raise
+    
+    finally:
+        session.close()
+
+def insert_with_bulk_operations(csv_file_path, database_url):
+    """
+    Alternative method using bulk operations for better performance with large datasets
+    """
+    engine = create_engine(database_url)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    
+    try:
+        # Read CSV
+        df = pd.read_csv(csv_file_path)
+        df.columns = df.columns.str.strip()
+        
+        # Clean and prepare data
+        df = df.dropna(subset=['ROLE_NAME', 'COMPLIANCE_REQUIREMENT_ID', 'COMPLIANCE_REQUIREMENT_NAME'])
+        df['ROLE_NAME'] = df['ROLE_NAME'].str.strip()
+        df['COMPLIANCE_REQUIREMENT_ID'] = df['COMPLIANCE_REQUIREMENT_ID'].astype(str).str.strip()
+        df['COMPLIANCE_REQUIREMENT_NAME'] = df['COMPLIANCE_REQUIREMENT_NAME'].str.strip()
+        
+        # Get existing roles only (do not create new ones)
+        stmt = select(ComplianceRole)
+        existing_roles_result = session.execute(stmt).scalars().all()
+        existing_roles = {role.name: role.id for role in existing_roles_result}
+        
+        # Filter out rows where role doesn't exist
+        valid_rows = []
+        skipped_count = 0
+        
+        for _, row in df.iterrows():
+            role_name = row['ROLE_NAME']
+            if role_name not in existing_roles:
+                logger.warning(f"Skipping record: ComplianceRole '{role_name}' not found in database")
+                skipped_count += 1
+                continue
+            valid_rows.append(row)
+        
+        logger.info(f"Processing {len(valid_rows)} valid rows, skipped {skipped_count} rows due to missing roles")
+        
+        if not valid_rows:
+            logger.warning("No valid rows to process")
+            return
+        
+        # Prepare requirements data
+        requirements_to_insert = []
+        requirements_to_update = []
+        
+        for _, row in df.iterrows():
+            role_name = row['ROLE_NAME']
+            req_id = row['COMPLIANCE_REQUIREMENT_ID']
+            req_name = row['COMPLIANCE_REQUIREMENT_NAME']
+            
+            role_id = existing_roles[role_name]  # Safe to access since validation passed
+            
+            # Check if requirement exists
+            stmt = select(ComplianceRequirement).where(ComplianceRequirement.snowflake_req_id == req_id)
+            existing_req = session.execute(stmt).scalar_one_or_none()
+            
+            if not existing_req:
+                requirements_to_insert.append({
+                    'name': req_name,
+                    'snowflake_req_id': req_id,
+                    'compliance_role_id': role_id
+                })
+            else:
+                # Update if necessary
+                if existing_req.name != req_name or existing_req.compliance_role_id != role_id:
+                    requirements_to_update.append({
+                        'id': existing_req.id,
+                        'name': req_name,
+                        'snowflake_req_id': req_id,
+                        'compliance_role_id': role_id
+                    })
+        
+        # Bulk insert requirements
+        if requirements_to_insert:
+            session.bulk_insert_mappings(ComplianceRequirement, requirements_to_insert)
+            logger.info(f"Bulk inserted {len(requirements_to_insert)} compliance requirements")
+        
+        # Bulk update requirements
+        if requirements_to_update:
+            session.bulk_update_mappings(ComplianceRequirement, requirements_to_update)
+            logger.info(f"Bulk updated {len(requirements_to_update)} compliance requirements")
+        
+        session.commit()
+        logger.info("Bulk operations completed successfully")
+        
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error in bulk operations: {str(e)}")
+        raise
+    
+    finally:
+        session.close()
+
+# Example usage
+if __name__ == "__main__":
+    # Configuration
+    CSV_FILE_PATH = "compliance_data.csv"  # Update with your CSV file path
+    DATABASE_URL = "sqlite:///compliance.db"  # Update with your database URL
+    
+    # Choose method based on your needs:
+    # Method 1: Row-by-row processing (better for complex logic and error handling)
+    insert_compliance_data_from_csv(CSV_FILE_PATH, DATABASE_URL)
+    
+    # Method 2: Bulk operations (better for large datasets)
+    # insert_with_bulk_operations(CSV_FILE_PATH, DATABASE_URL)
