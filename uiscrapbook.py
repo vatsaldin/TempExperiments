@@ -113,6 +113,7 @@ def get_employee_data(_session):
     
     # Query to get employee allocations with related data
     query = select(
+        Employee.id.label('employee_id'),
         Employee.first_name,
         Employee.last_name,
         Shift.name.label('shift_name'),
@@ -138,7 +139,7 @@ def get_employee_data(_session):
     
     # Convert to DataFrame
     df = pd.DataFrame(result, columns=[
-        'first_name', 'last_name', 'shift_name', 'role_name', 
+        'employee_id', 'first_name', 'last_name', 'shift_name', 'role_name', 
         'stream_name', 'stream_category', 'capacity', 'on_leave', 'is_facility_trainer'
     ])
     
@@ -149,40 +150,115 @@ def get_employee_data(_session):
     return df
 
 @st.cache_data
-def get_compliance_data(_session):
-    """Fetch compliance status data"""
+def get_stream_names(_session):
+    """Fetch all stream names from the database"""
     
-    # This would be more complex based on your actual compliance requirements
-    # For now, creating sample compliance data
-    compliance_types = [
-        'LNG R2 Area', 'LNG PV Panel', 'LNG B4 Area', 'LNG P4 Panel',
-        'SU Area', 'Doggers Area', 'Control Panel', 'Utilities Area',
-        'Shift LOT Panel', 'Power gen Panel'
-    ]
+    query = select(Stream.name).order_by(Stream.name)
+    result = _session.execute(query).fetchall()
     
-    # You would replace this with actual compliance queries
-    # This is just sample data structure
-    return pd.DataFrame()
+    # Return list of stream names
+    return [row[0] for row in result]
 
-def create_compliance_matrix(df):
+@st.cache_data
+def get_compliance_data(_session, employee_ids, stream_names):
+    """Fetch compliance status data for employees across all streams"""
+    
+    # Query to get employee compliance status for each stream
+    # This joins employee allocations with compliance status
+    query = select(
+        Employee.id.label('employee_id'),
+        Employee.first_name,
+        Employee.last_name,
+        Stream.name.label('stream_name'),
+        EmployeeComplianceStatus.status
+    ).select_from(
+        Employee
+    ).join(
+        EmployeeAllocation, Employee.id == EmployeeAllocation.employee_id
+    ).join(
+        Stream, EmployeeAllocation.stream_id == Stream.id
+    ).outerjoin(
+        EmployeeComplianceStatus, Employee.id == EmployeeComplianceStatus.staff_id
+    ).where(
+        Employee.id.in_(employee_ids)
+    )
+    
+    result = _session.execute(query).fetchall()
+    
+    # Convert to DataFrame
+    compliance_df = pd.DataFrame(result, columns=[
+        'employee_id', 'first_name', 'last_name', 'stream_name', 'status'
+    ])
+    
+    return compliance_df
+
+def create_compliance_matrix(df, session):
     """Create the compliance matrix similar to your spreadsheet"""
     
-    # Pivot data to create matrix format
-    matrix_df = df.groupby(['Name', 'shift_name', 'role_name']).first().reset_index()
+    # Get unique employees from the filtered data
+    unique_employees = df.groupby(['Name', 'shift_name', 'role_name']).first().reset_index()
     
-    # Add compliance columns (these would be populated from actual compliance data)
-    compliance_columns = [
-        'LNG R2 Area', 'LNG PV Panel', 'LNG B4 Area', 'LNG P4 Panel',
-        'SU Area', 'Doggers Area', 'Control Panel', 'Utilities Area',
-        'Shift LOT Panel', 'Power gen Panel'
-    ]
+    # Get all stream names dynamically from database
+    stream_names = get_stream_names(session)
     
-    # For demonstration, randomly assign compliance status
-    import random
-    for col in compliance_columns:
-        matrix_df[col] = [random.choice(['✓', '⚠️', '❌', '']) for _ in range(len(matrix_df))]
+    # Get employee IDs for compliance lookup
+    employee_ids = df['employee_id'].unique() if 'employee_id' in df.columns else []
     
-    return matrix_df
+    # Initialize matrix with employee info
+    matrix_df = unique_employees[['Name', 'shift_name', 'role_name']].copy()
+    
+    if len(employee_ids) > 0:
+        # Get compliance data
+        compliance_df = get_compliance_data(session, employee_ids, stream_names)
+        
+        # Create employee name mapping
+        if not compliance_df.empty:
+            compliance_df['full_name'] = (
+                compliance_df['first_name'].fillna('') + ' ' + 
+                compliance_df['last_name'].fillna('')
+            ).str.strip()
+            
+            # Pivot compliance data to get streams as columns
+            compliance_pivot = compliance_df.pivot_table(
+                index='full_name',
+                columns='stream_name',
+                values='status',
+                aggfunc='first',
+                fill_value=''
+            )
+            
+            # Merge with matrix_df
+            matrix_df = matrix_df.merge(
+                compliance_pivot,
+                left_on='Name',
+                right_index=True,
+                how='left'
+            )
+    
+    # Ensure all stream columns exist (fill missing streams with empty values)
+    for stream_name in stream_names:
+        if stream_name not in matrix_df.columns:
+            matrix_df[stream_name] = ''
+    
+    # Convert compliance status to symbols
+    def convert_status(status):
+        if pd.isna(status) or status == '':
+            return ''
+        elif status.lower() in ['compliant', 'complete', 'passed', 'yes', 'true']:
+            return '✓'
+        elif status.lower() in ['pending', 'in_progress', 'partial']:
+            return '⚠️'
+        elif status.lower() in ['non_compliant', 'failed', 'no', 'false']:
+            return '❌'
+        else:
+            return status
+    
+    # Apply status conversion to stream columns
+    for stream_name in stream_names:
+        if stream_name in matrix_df.columns:
+            matrix_df[stream_name] = matrix_df[stream_name].apply(convert_status)
+    
+    return matrix_df, stream_names
 
 def style_compliance_cell(val):
     """Style cells based on compliance status"""
@@ -241,7 +317,7 @@ def main():
         ]
         
         # Create compliance matrix
-        matrix_df = create_compliance_matrix(filtered_df)
+        matrix_df, stream_names = create_compliance_matrix(filtered_df, session)
         
         # Display metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -252,33 +328,39 @@ def main():
         with col3:
             st.metric("Roles", len(roles))
         with col4:
-            st.metric("Streams", len(streams))
+            st.metric("Streams", len(stream_names))
         
         st.markdown("---")
         
         # Main compliance matrix
         st.subheader("📋 Employee Compliance Matrix")
         
-        # Prepare display dataframe
-        display_columns = ['Name', 'shift_name', 'role_name'] + [
-            'LNG R2 Area', 'LNG PV Panel', 'LNG B4 Area', 'LNG P4 Panel',
-            'SU Area', 'Doggers Area', 'Control Panel', 'Utilities Area',
-            'Shift LOT Panel', 'Power gen Panel'
-        ]
+        # Prepare display dataframe with dynamic stream columns
+        base_columns = ['Name', 'shift_name', 'role_name']
+        display_columns = base_columns + stream_names
+        
+        # Ensure all columns exist in matrix_df
+        for col in display_columns:
+            if col not in matrix_df.columns:
+                matrix_df[col] = ''
         
         display_df = matrix_df[display_columns].copy()
-        display_df.columns = ['Name', 'Shift', 'Role'] + [
-            'LNG R2 Area', 'LNG PV Panel', 'LNG B4 Area', 'LNG P4 Panel',
-            'SU Area', 'Doggers Area', 'Control Panel', 'Utilities Area',
-            'Shift LOT Panel', 'Power gen Panel'
-        ]
         
-        # Style the dataframe
+        # Rename columns for better display
+        column_mapping = {
+            'shift_name': 'Shift',
+            'role_name': 'Role'
+        }
+        # Keep stream names as they are from the database
+        for stream in stream_names:
+            column_mapping[stream] = stream
+        
+        display_df = display_df.rename(columns=column_mapping)
+        
+        # Style the dataframe - apply styling to all stream columns
         styled_df = display_df.style.applymap(
             style_compliance_cell,
-            subset=['LNG R2 Area', 'LNG PV Panel', 'LNG B4 Area', 'LNG P4 Panel',
-                   'SU Area', 'Doggers Area', 'Control Panel', 'Utilities Area',
-                   'Shift LOT Panel', 'Power gen Panel']
+            subset=stream_names  # Apply styling to dynamic stream columns
         )
         
         # Display the matrix
