@@ -1,12 +1,113 @@
 import streamlit as st
 import pandas as pd
-from sqlalchemy import create_engine, select, func
+from sqlalchemy import create_engine, select, func, ForeignKey, String, Float, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Mapped, mapped_column
 from typing import List, Optional
 import plotly.express as px
 
 # Database Models (SQLAlchemy 2.0)
 Base = declarative_base()
+
+# Association table for shift compliance requirements
+class ShiftComplianceRequirement(Base):
+    __tablename__ = "shift_compliance_requirement"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shift_id: Mapped[int] = mapped_column(ForeignKey("shift.id"), primary_key=True)
+    comp_role_id: Mapped[int] = mapped_column(ForeignKey("compliance_role.id"), primary_key=True)
+    min_comp_required: Mapped[int]
+    
+    # Relationships
+    shift: Mapped["Shift"] = relationship(back_populates="compliance_requirements")
+    compliance_role: Mapped["ComplianceRole"] = relationship(back_populates="shift_compliance_requirements")
+
+class Shift(Base):
+    __tablename__ = "shift"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    
+    # Relationships
+    compliance_requirements: Mapped[List["ShiftComplianceRequirement"]] = relationship(
+        back_populates="shift"
+    )
+    allocations: Mapped[List["EmployeeAllocation"]] = relationship(back_populates="shift")
+
+class Employee(Base):
+    __tablename__ = "employee"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    wop_id: Mapped[str] = mapped_column(String(6), unique=True)
+    first_name: Mapped[str]
+    last_name: Mapped[str]
+    on_leave: Mapped[bool] = mapped_column(default=False)
+    is_facility_trainer: Mapped[bool] = mapped_column(default=False)
+    start_date_KGP_ops: Mapped[Optional[DateTime]] = mapped_column(nullable=True)
+    
+    # Relationships
+    allocations: Mapped[List["EmployeeAllocation"]] = relationship(
+        back_populates="employee", cascade="all, delete-orphan"
+    )
+    compliance_statuses: Mapped[List["EmployeeComplianceStatus"]] = relationship(
+        back_populates="employee"
+    )
+
+class ComplianceRequirement(Base):
+    __tablename__ = "compliance_requirement"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    snowflake_req_id: Mapped[str] = mapped_column(String(20), unique=True)
+    compliance_role_id: Mapped[int] = mapped_column(ForeignKey("compliance_role.id"))
+    
+    # Relationships
+    compliance_role: Mapped["ComplianceRole"] = relationship(
+        back_populates="compliance_requirements"
+    )
+    employee_compliance_statuses: Mapped[List["EmployeeComplianceStatus"]] = relationship(
+        back_populates="compliance_requirement"
+    )
+
+class ComplianceRole(Base):
+    __tablename__ = "compliance_role"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    short_name: Mapped[str] = mapped_column(String(20), unique=True)
+    is_panel: Mapped[bool]
+    
+    # Relationships
+    compliance_requirements: Mapped[List["ComplianceRequirement"]] = relationship(
+        back_populates="compliance_role"
+    )
+    shift_compliance_requirements: Mapped[List["ShiftComplianceRequirement"]] = relationship(
+        back_populates="compliance_role"
+    )
+
+class EmployeeAllocation(Base):
+    __tablename__ = "employee_allocation"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employee.id"))
+    role_id: Mapped[int] = mapped_column(ForeignKey("role.id"))
+    shift_id: Mapped[int] = mapped_column(ForeignKey("shift.id"))
+    stream_id: Mapped[int] = mapped_column(ForeignKey("stream.id"))
+    capacity: Mapped[float] = mapped_column(Float, nullable=False)
+    
+    # Relationships
+    employee: Mapped["Employee"] = relationship(back_populates="allocations")
+    role: Mapped["Role"] = relationship(back_populates="allocations")
+    shift: Mapped["Shift"] = relationship(back_populates="allocations")
+    stream: Mapped["Stream"] = relationship(back_populates="allocations")
+
+class Role(Base):
+    __tablename__ = "role"
+    
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    
+    # Relationships
+    allocations: Mapped[List["EmployeeAllocation"]] = relationship(back_populates="role")
 
 class Stream(Base):
     __tablename__ = "stream"
@@ -16,80 +117,23 @@ class Stream(Base):
     category: Mapped[str]  # Operate, Execute, Project, Turnaround
     
     # Relationships
-    roles: Mapped[List["Role"]] = relationship(
-        secondary="stream_role_table", back_populates="streams"
-    )
-    allocations: Mapped[List["EmployeeAllocation"]] = relationship(
-        back_populates="stream"
-    )
-
-class Role(Base):
-    __tablename__ = "role"
-    
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str]
-    
-    # Relationships
-    streams: Mapped[List["Stream"]] = relationship(
-        secondary="stream_role_table", back_populates="roles"
-    )
-
-class Shift(Base):
-    __tablename__ = "shift"
-    
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str]
-
-class Employee(Base):
-    __tablename__ = "employee"
-    
-    id: Mapped[int] = mapped_column(primary_key=True)
-    wopid: Mapped[Optional[str]]
-    first_name: Mapped[Optional[str]]
-    last_name: Mapped[Optional[str]]
-    on_leave: Mapped[bool] = mapped_column(default=False)
-    is_facility_trainer: Mapped[bool] = mapped_column(default=False)
-    start_date_KGP_ops: Mapped[Optional[str]]  # Using str for datetime
-    
-    # Relationships
-    allocations: Mapped[List["EmployeeAllocation"]] = relationship(
-        back_populates="employee"
-    )
-    compliance_status: Mapped[List["EmployeeComplianceStatus"]] = relationship(
-        back_populates="employee"
-    )
-
-class EmployeeAllocation(Base):
-    __tablename__ = "employee_allocation"
-    
-    id: Mapped[int] = mapped_column(primary_key=True)
-    employee_id: Mapped[int]
-    stream_id: Mapped[int]
-    role_id: Mapped[int]
-    shift_id: Mapped[int]
-    capacity: Mapped[float]
-    
-    # Relationships
-    employee: Mapped["Employee"] = relationship(back_populates="allocations")
-    stream: Mapped["Stream"] = relationship(back_populates="allocations")
-
-class ComplianceRequirements(Base):
-    __tablename__ = "compliance_requirements"
-    
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str]
-    comp_role_id: Mapped[int]
+    allocations: Mapped[List["EmployeeAllocation"]] = relationship(back_populates="stream")
 
 class EmployeeComplianceStatus(Base):
     __tablename__ = "employee_compliance_status"
     
     id: Mapped[int] = mapped_column(primary_key=True)
-    staff_id: Mapped[int]
-    comp_req_id: Mapped[int]
-    status: Mapped[str]
+    employee_id: Mapped[int] = mapped_column(ForeignKey("employee.id"), primary_key=True)
+    compliance_requirement_id: Mapped[int] = mapped_column(
+        ForeignKey("compliance_requirement.id"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(20))  # e.g., "Completed", "Assigned"
     
     # Relationships
-    employee: Mapped["Employee"] = relationship(back_populates="compliance_status")
+    employee: Mapped["Employee"] = relationship(back_populates="compliance_statuses")
+    compliance_requirement: Mapped["ComplianceRequirement"] = relationship(
+        back_populates="employee_compliance_statuses"
+    )
 
 # Streamlit App Configuration
 st.set_page_config(
@@ -109,13 +153,13 @@ def init_database():
 
 @st.cache_data
 def get_employee_data(_session):
-    """Fetch employee data with compliance status"""
+    """Fetch employee data with their allocations"""
     
-    # Query to get employee allocations with related data
     query = select(
         Employee.id.label('employee_id'),
         Employee.first_name,
         Employee.last_name,
+        Employee.wop_id,
         Shift.name.label('shift_name'),
         Role.name.label('role_name'),
         Stream.name.label('stream_name'),
@@ -139,7 +183,7 @@ def get_employee_data(_session):
     
     # Convert to DataFrame
     df = pd.DataFrame(result, columns=[
-        'employee_id', 'first_name', 'last_name', 'shift_name', 'role_name', 
+        'employee_id', 'first_name', 'last_name', 'wop_id', 'shift_name', 'role_name', 
         'stream_name', 'stream_category', 'capacity', 'on_leave', 'is_facility_trainer'
     ])
     
@@ -150,35 +194,39 @@ def get_employee_data(_session):
     return df
 
 @st.cache_data
-def get_stream_names(_session):
-    """Fetch all stream names from the database"""
+def get_compliance_requirements(_session):
+    """Fetch all compliance requirements that should appear as columns"""
     
-    query = select(Stream.name).order_by(Stream.name)
+    query = select(
+        ComplianceRequirement.id,
+        ComplianceRequirement.name,
+        ComplianceRole.short_name.label('role_short_name')
+    ).select_from(
+        ComplianceRequirement
+    ).join(
+        ComplianceRole, ComplianceRequirement.compliance_role_id == ComplianceRole.id
+    ).order_by(ComplianceRequirement.name)
+    
     result = _session.execute(query).fetchall()
     
-    # Return list of stream names
-    return [row[0] for row in result]
+    return [(row[0], row[1], row[2]) for row in result]
 
 @st.cache_data
-def get_compliance_data(_session, employee_ids, stream_names):
-    """Fetch compliance status data for employees across all streams"""
+def get_employee_compliance_data(_session, employee_ids):
+    """Fetch compliance status for all employees"""
     
-    # Query to get employee compliance status for each stream
-    # This joins employee allocations with compliance status
     query = select(
         Employee.id.label('employee_id'),
         Employee.first_name,
         Employee.last_name,
-        Stream.name.label('stream_name'),
+        ComplianceRequirement.name.label('requirement_name'),
         EmployeeComplianceStatus.status
     ).select_from(
         Employee
     ).join(
-        EmployeeAllocation, Employee.id == EmployeeAllocation.employee_id
+        EmployeeComplianceStatus, Employee.id == EmployeeComplianceStatus.employee_id
     ).join(
-        Stream, EmployeeAllocation.stream_id == Stream.id
-    ).outerjoin(
-        EmployeeComplianceStatus, Employee.id == EmployeeComplianceStatus.staff_id
+        ComplianceRequirement, EmployeeComplianceStatus.compliance_requirement_id == ComplianceRequirement.id
     ).where(
         Employee.id.in_(employee_ids)
     )
@@ -187,41 +235,44 @@ def get_compliance_data(_session, employee_ids, stream_names):
     
     # Convert to DataFrame
     compliance_df = pd.DataFrame(result, columns=[
-        'employee_id', 'first_name', 'last_name', 'stream_name', 'status'
+        'employee_id', 'first_name', 'last_name', 'requirement_name', 'status'
     ])
+    
+    if not compliance_df.empty:
+        compliance_df['full_name'] = (
+            compliance_df['first_name'].fillna('') + ' ' + 
+            compliance_df['last_name'].fillna('')
+        ).str.strip()
     
     return compliance_df
 
 def create_compliance_matrix(df, session):
-    """Create the compliance matrix similar to your spreadsheet"""
+    """Create the compliance matrix matching the spreadsheet format"""
     
     # Get unique employees from the filtered data
-    unique_employees = df.groupby(['Name', 'shift_name', 'role_name']).first().reset_index()
+    unique_employees = df.groupby(['Name', 'shift_name', 'role_name']).agg({
+        'employee_id': 'first'
+    }).reset_index()
     
-    # Get all stream names dynamically from database
-    stream_names = get_stream_names(session)
+    # Get all compliance requirements
+    compliance_requirements = get_compliance_requirements(session)
+    requirement_names = [req[1] for req in compliance_requirements]  # Extract requirement names
     
     # Get employee IDs for compliance lookup
-    employee_ids = df['employee_id'].unique() if 'employee_id' in df.columns else []
+    employee_ids = unique_employees['employee_id'].unique()
     
     # Initialize matrix with employee info
     matrix_df = unique_employees[['Name', 'shift_name', 'role_name']].copy()
     
     if len(employee_ids) > 0:
         # Get compliance data
-        compliance_df = get_compliance_data(session, employee_ids, stream_names)
+        compliance_df = get_employee_compliance_data(session, employee_ids)
         
-        # Create employee name mapping
         if not compliance_df.empty:
-            compliance_df['full_name'] = (
-                compliance_df['first_name'].fillna('') + ' ' + 
-                compliance_df['last_name'].fillna('')
-            ).str.strip()
-            
-            # Pivot compliance data to get streams as columns
+            # Pivot compliance data to get requirements as columns
             compliance_pivot = compliance_df.pivot_table(
                 index='full_name',
-                columns='stream_name',
+                columns='requirement_name',
                 values='status',
                 aggfunc='first',
                 fill_value=''
@@ -235,41 +286,41 @@ def create_compliance_matrix(df, session):
                 how='left'
             )
     
-    # Ensure all stream columns exist (fill missing streams with empty values)
-    for stream_name in stream_names:
-        if stream_name not in matrix_df.columns:
-            matrix_df[stream_name] = ''
+    # Ensure all requirement columns exist (fill missing requirements with empty values)
+    for req_name in requirement_names:
+        if req_name not in matrix_df.columns:
+            matrix_df[req_name] = ''
     
-    # Convert compliance status to symbols
+    # Convert compliance status to visual symbols
     def convert_status(status):
-        if pd.isna(status) or status == '':
+        if pd.isna(status) or status == '' or status is None:
             return ''
-        elif status.lower() in ['compliant', 'complete', 'passed', 'yes', 'true']:
+        elif str(status).lower() in ['completed', 'complete', 'passed', 'yes', 'true', 'compliant']:
             return '✓'
-        elif status.lower() in ['pending', 'in_progress', 'partial']:
+        elif str(status).lower() in ['assigned', 'pending', 'in_progress', 'partial']:
             return '⚠️'
-        elif status.lower() in ['non_compliant', 'failed', 'no', 'false']:
+        elif str(status).lower() in ['not_completed', 'failed', 'no', 'false', 'non_compliant']:
             return '❌'
         else:
-            return status
+            return str(status)
     
-    # Apply status conversion to stream columns
-    for stream_name in stream_names:
-        if stream_name in matrix_df.columns:
-            matrix_df[stream_name] = matrix_df[stream_name].apply(convert_status)
+    # Apply status conversion to requirement columns
+    for req_name in requirement_names:
+        if req_name in matrix_df.columns:
+            matrix_df[req_name] = matrix_df[req_name].apply(convert_status)
     
-    return matrix_df, stream_names
+    return matrix_df, requirement_names
 
 def style_compliance_cell(val):
     """Style cells based on compliance status"""
     if val == '✓':
-        return 'background-color: #90EE90'  # Light green
+        return 'background-color: #90EE90; color: black'  # Light green
     elif val == '⚠️':
-        return 'background-color: #FFD700'  # Gold
+        return 'background-color: #FFD700; color: black'  # Gold/Yellow
     elif val == '❌':
-        return 'background-color: #FFB6C1'  # Light pink
+        return 'background-color: #FFB6C1; color: black'  # Light pink/red
     else:
-        return ''
+        return 'background-color: white; color: black'
 
 def main():
     st.title("🏭 Employee Compliance Dashboard")
@@ -293,20 +344,20 @@ def main():
         # Filter options
         shifts = st.sidebar.multiselect(
             "Select Shifts:",
-            options=df['shift_name'].unique(),
-            default=df['shift_name'].unique()
+            options=sorted(df['shift_name'].unique()),
+            default=sorted(df['shift_name'].unique())
         )
         
         roles = st.sidebar.multiselect(
             "Select Roles:",
-            options=df['role_name'].unique(),
-            default=df['role_name'].unique()
+            options=sorted(df['role_name'].unique()),
+            default=sorted(df['role_name'].unique())
         )
         
         streams = st.sidebar.multiselect(
             "Select Streams:",
-            options=df['stream_name'].unique(),
-            default=df['stream_name'].unique()
+            options=sorted(df['stream_name'].unique()),
+            default=sorted(df['stream_name'].unique())
         )
         
         # Apply filters
@@ -317,7 +368,7 @@ def main():
         ]
         
         # Create compliance matrix
-        matrix_df, stream_names = create_compliance_matrix(filtered_df, session)
+        matrix_df, requirement_names = create_compliance_matrix(filtered_df, session)
         
         # Display metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -328,16 +379,16 @@ def main():
         with col3:
             st.metric("Roles", len(roles))
         with col4:
-            st.metric("Streams", len(stream_names))
+            st.metric("Compliance Areas", len(requirement_names))
         
         st.markdown("---")
         
         # Main compliance matrix
         st.subheader("📋 Employee Compliance Matrix")
         
-        # Prepare display dataframe with dynamic stream columns
+        # Prepare display dataframe with dynamic requirement columns
         base_columns = ['Name', 'shift_name', 'role_name']
-        display_columns = base_columns + stream_names
+        display_columns = base_columns + requirement_names
         
         # Ensure all columns exist in matrix_df
         for col in display_columns:
@@ -347,21 +398,21 @@ def main():
         display_df = matrix_df[display_columns].copy()
         
         # Rename columns for better display
-        column_mapping = {
+        display_df = display_df.rename(columns={
             'shift_name': 'Shift',
             'role_name': 'Role'
-        }
-        # Keep stream names as they are from the database
-        for stream in stream_names:
-            column_mapping[stream] = stream
+        })
         
-        display_df = display_df.rename(columns=column_mapping)
+        # Update requirement_names for styling (after column rename)
+        styled_columns = requirement_names
         
-        # Style the dataframe - apply styling to all stream columns
+        # Style the dataframe - apply styling to all requirement columns
         styled_df = display_df.style.applymap(
             style_compliance_cell,
-            subset=stream_names  # Apply styling to dynamic stream columns
-        )
+            subset=styled_columns
+        ).set_properties(**{
+            'text-align': 'center'
+        }, subset=styled_columns)
         
         # Display the matrix
         st.dataframe(
@@ -374,9 +425,9 @@ def main():
         st.markdown("### 📝 Legend")
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.markdown("✅ **Compliant** - All requirements met")
+            st.markdown("✅ **Compliant** - Requirements completed")
         with col2:
-            st.markdown("⚠️ **Pending** - In progress or needs attention")
+            st.markdown("⚠️ **Assigned/Pending** - In progress or assigned")
         with col3:
             st.markdown("❌ **Non-compliant** - Requirements not met")
         
@@ -397,6 +448,7 @@ def main():
                 title="Employees by Role",
                 labels={'role_name': 'Role', 'count': 'Number of Employees'}
             )
+            fig_role.update_xaxes(tickangle=45)
             st.plotly_chart(fig_role, use_container_width=True)
         
         with col2:
@@ -410,11 +462,40 @@ def main():
             )
             st.plotly_chart(fig_shift, use_container_width=True)
         
+        # Compliance summary statistics
+        if len(requirement_names) > 0:
+            st.markdown("### 📈 Compliance Summary")
+            
+            total_cells = len(matrix_df) * len(requirement_names)
+            completed_cells = 0
+            pending_cells = 0
+            non_compliant_cells = 0
+            
+            for req_name in requirement_names:
+                if req_name in matrix_df.columns:
+                    completed_cells += (matrix_df[req_name] == '✓').sum()
+                    pending_cells += (matrix_df[req_name] == '⚠️').sum()
+                    non_compliant_cells += (matrix_df[req_name] == '❌').sum()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Compliance Checks", total_cells)
+            with col2:
+                completion_rate = (completed_cells / total_cells * 100) if total_cells > 0 else 0
+                st.metric("Completion Rate", f"{completion_rate:.1f}%")
+            with col3:
+                pending_rate = (pending_cells / total_cells * 100) if total_cells > 0 else 0
+                st.metric("Pending Rate", f"{pending_rate:.1f}%")
+            with col4:
+                non_compliant_rate = (non_compliant_cells / total_cells * 100) if total_cells > 0 else 0
+                st.metric("Non-compliant Rate", f"{non_compliant_rate:.1f}%")
+        
         session.close()
         
     except Exception as e:
         st.error(f"Database connection error: {str(e)}")
         st.info("Please ensure your database is properly configured and accessible.")
+        st.exception(e)  # Show full error details for debugging
 
 if __name__ == "__main__":
     main()
