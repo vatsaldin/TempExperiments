@@ -194,32 +194,38 @@ def get_employee_data(_session):
     return df
 
 @st.cache_data
-def get_compliance_requirements(_session):
-    """Fetch all compliance requirements that should appear as columns"""
+def get_shift_compliance_requirements(_session):
+    """Fetch compliance requirements for each shift"""
     
     query = select(
-        ComplianceRequirement.id,
-        ComplianceRequirement.name,
-        ComplianceRole.short_name.label('role_short_name')
+        Shift.name.label('shift_name'),
+        ComplianceRole.short_name.label('compliance_role_short_name'),
+        ComplianceRole.name.label('compliance_role_name'),
+        ShiftComplianceRequirement.min_comp_required
     ).select_from(
-        ComplianceRequirement
+        ShiftComplianceRequirement
     ).join(
-        ComplianceRole, ComplianceRequirement.compliance_role_id == ComplianceRole.id
-    ).order_by(ComplianceRequirement.name)
+        Shift, ShiftComplianceRequirement.shift_id == Shift.id
+    ).join(
+        ComplianceRole, ShiftComplianceRequirement.comp_role_id == ComplianceRole.id
+    ).order_by(Shift.name, ComplianceRole.short_name)
     
     result = _session.execute(query).fetchall()
     
-    return [(row[0], row[1], row[2]) for row in result]
+    return pd.DataFrame(result, columns=[
+        'shift_name', 'compliance_role_short_name', 'compliance_role_name', 'min_comp_required'
+    ])
 
 @st.cache_data
-def get_employee_compliance_data(_session, employee_ids):
-    """Fetch compliance status for all employees"""
+def get_employee_compliance_status(_session, employee_ids):
+    """Fetch compliance status for employees"""
     
     query = select(
         Employee.id.label('employee_id'),
         Employee.first_name,
         Employee.last_name,
         ComplianceRequirement.name.label('requirement_name'),
+        ComplianceRole.short_name.label('compliance_role_short_name'),
         EmployeeComplianceStatus.status
     ).select_from(
         Employee
@@ -227,6 +233,8 @@ def get_employee_compliance_data(_session, employee_ids):
         EmployeeComplianceStatus, Employee.id == EmployeeComplianceStatus.employee_id
     ).join(
         ComplianceRequirement, EmployeeComplianceStatus.compliance_requirement_id == ComplianceRequirement.id
+    ).join(
+        ComplianceRole, ComplianceRequirement.compliance_role_id == ComplianceRole.id
     ).where(
         Employee.id.in_(employee_ids)
     )
@@ -235,7 +243,8 @@ def get_employee_compliance_data(_session, employee_ids):
     
     # Convert to DataFrame
     compliance_df = pd.DataFrame(result, columns=[
-        'employee_id', 'first_name', 'last_name', 'requirement_name', 'status'
+        'employee_id', 'first_name', 'last_name', 'requirement_name', 
+        'compliance_role_short_name', 'status'
     ])
     
     if not compliance_df.empty:
@@ -247,16 +256,18 @@ def get_employee_compliance_data(_session, employee_ids):
     return compliance_df
 
 def create_compliance_matrix(df, session):
-    """Create the compliance matrix matching the spreadsheet format"""
+    """Create the compliance matrix based on shift requirements and employee compliance status"""
     
     # Get unique employees from the filtered data
     unique_employees = df.groupby(['Name', 'shift_name', 'role_name']).agg({
         'employee_id': 'first'
     }).reset_index()
     
-    # Get all compliance requirements
-    compliance_requirements = get_compliance_requirements(session)
-    requirement_names = [req[1] for req in compliance_requirements]  # Extract requirement names
+    # Get shift compliance requirements to determine which columns to show
+    shift_requirements = get_shift_compliance_requirements(session)
+    
+    # Get all unique compliance role short names from shift requirements
+    all_compliance_roles = shift_requirements['compliance_role_short_name'].unique()
     
     # Get employee IDs for compliance lookup
     employee_ids = unique_employees['employee_id'].unique()
@@ -265,14 +276,21 @@ def create_compliance_matrix(df, session):
     matrix_df = unique_employees[['Name', 'shift_name', 'role_name']].copy()
     
     if len(employee_ids) > 0:
-        # Get compliance data
-        compliance_df = get_employee_compliance_data(session, employee_ids)
+        # Get employee compliance status
+        compliance_df = get_employee_compliance_status(session, employee_ids)
         
         if not compliance_df.empty:
-            # Pivot compliance data to get requirements as columns
+            # Create a mapping of what compliance roles each employee should have based on their shift
+            employee_shift_requirements = matrix_df.merge(
+                shift_requirements, 
+                on='shift_name', 
+                how='left'
+            )
+            
+            # Pivot compliance data to get compliance role short names as columns
             compliance_pivot = compliance_df.pivot_table(
                 index='full_name',
-                columns='requirement_name',
+                columns='compliance_role_short_name',
                 values='status',
                 aggfunc='first',
                 fill_value=''
@@ -285,42 +303,49 @@ def create_compliance_matrix(df, session):
                 right_index=True,
                 how='left'
             )
+            
+            # Filter columns to only show those relevant to the shifts in the filtered data
+            relevant_shifts = matrix_df['shift_name'].unique()
+            relevant_compliance_roles = shift_requirements[
+                shift_requirements['shift_name'].isin(relevant_shifts)
+            ]['compliance_role_short_name'].unique()
+            
+            # Update all_compliance_roles to only include relevant ones
+            all_compliance_roles = relevant_compliance_roles
     
-    # Ensure all requirement columns exist (fill missing requirements with empty values)
-    for req_name in requirement_names:
-        if req_name not in matrix_df.columns:
-            matrix_df[req_name] = ''
+    # Ensure all relevant compliance role columns exist
+    for role_short_name in all_compliance_roles:
+        if role_short_name not in matrix_df.columns:
+            matrix_df[role_short_name] = ''
     
-    # Convert compliance status to visual symbols
-    def convert_status(status):
-        if pd.isna(status) or status == '' or status is None:
-            return ''
-        elif str(status).lower() in ['completed', 'complete', 'passed', 'yes', 'true', 'compliant']:
-            return '✓'
-        elif str(status).lower() in ['assigned', 'pending', 'in_progress', 'partial']:
-            return '⚠️'
-        elif str(status).lower() in ['not_completed', 'failed', 'no', 'false', 'non_compliant']:
-            return '❌'
-        else:
-            return str(status)
+    # Only show cells that should have data based on shift requirements
+    for idx, row in matrix_df.iterrows():
+        employee_shift = row['shift_name']
+        # Get compliance roles required for this employee's shift
+        required_roles = shift_requirements[
+            shift_requirements['shift_name'] == employee_shift
+        ]['compliance_role_short_name'].tolist()
+        
+        # Clear out columns that are not required for this employee's shift
+        for role_short_name in all_compliance_roles:
+            if role_short_name not in required_roles:
+                matrix_df.loc[idx, role_short_name] = ''
     
-    # Apply status conversion to requirement columns
-    for req_name in requirement_names:
-        if req_name in matrix_df.columns:
-            matrix_df[req_name] = matrix_df[req_name].apply(convert_status)
-    
-    return matrix_df, requirement_names
+    return matrix_df, all_compliance_roles
 
 def style_compliance_cell(val):
     """Style cells based on compliance status"""
-    if val == '✓':
-        return 'background-color: #90EE90; color: black'  # Light green
-    elif val == '⚠️':
-        return 'background-color: #FFD700; color: black'  # Gold/Yellow
-    elif val == '❌':
-        return 'background-color: #FFB6C1; color: black'  # Light pink/red
-    else:
+    if pd.isna(val) or val == '' or val is None:
         return 'background-color: white; color: black'
+    elif str(val).lower() in ['completed', 'complete', 'passed', 'yes', 'true', 'compliant']:
+        return 'background-color: #28a745; color: white; font-weight: bold'  # Green for completed
+    elif str(val).lower() in ['assigned', 'pending', 'in_progress', 'partial']:
+        return 'background-color: #ffc107; color: black; font-weight: bold'  # Yellow for pending
+    elif str(val).lower() in ['not_completed', 'failed', 'no', 'false', 'non_compliant']:
+        return 'background-color: #dc3545; color: white; font-weight: bold'  # Red for non-compliant
+    else:
+        # For any other status values, show them without special coloring
+        return 'background-color: #f8f9fa; color: black; font-weight: bold'
 
 def main():
     st.title("🏭 Employee Compliance Dashboard")
@@ -368,7 +393,7 @@ def main():
         ]
         
         # Create compliance matrix
-        matrix_df, requirement_names = create_compliance_matrix(filtered_df, session)
+        matrix_df, all_compliance_roles = create_compliance_matrix(filtered_df, session)
         
         # Display metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -379,16 +404,16 @@ def main():
         with col3:
             st.metric("Roles", len(roles))
         with col4:
-            st.metric("Compliance Areas", len(requirement_names))
+            st.metric("Compliance Areas", len(all_compliance_roles))
         
         st.markdown("---")
         
         # Main compliance matrix
         st.subheader("📋 Employee Compliance Matrix")
         
-        # Prepare display dataframe with dynamic requirement columns
+        # Prepare display dataframe with dynamic compliance role columns
         base_columns = ['Name', 'shift_name', 'role_name']
-        display_columns = base_columns + requirement_names
+        display_columns = base_columns + list(all_compliance_roles)
         
         # Ensure all columns exist in matrix_df
         for col in display_columns:
@@ -403,16 +428,31 @@ def main():
             'role_name': 'Role'
         })
         
-        # Update requirement_names for styling (after column rename)
-        styled_columns = requirement_names
+        # Update styled_columns for styling (after column rename)
+        styled_columns = list(all_compliance_roles)
         
-        # Style the dataframe - apply styling to all requirement columns
+        # Style the dataframe - apply styling to all compliance role columns
         styled_df = display_df.style.applymap(
             style_compliance_cell,
             subset=styled_columns
         ).set_properties(**{
-            'text-align': 'center'
-        }, subset=styled_columns)
+            'text-align': 'center',
+            'font-size': '12px',
+            'border': '1px solid #ddd',
+            'padding': '8px'
+        }, subset=styled_columns).set_table_styles([
+            {
+                'selector': 'th',
+                'props': [
+                    ('background-color', '#f8f9fa'),
+                    ('color', '#495057'),
+                    ('font-weight', 'bold'),
+                    ('text-align', 'center'),
+                    ('border', '1px solid #dee2e6'),
+                    ('padding', '10px')
+                ]
+            }
+        ])
         
         # Display the matrix
         st.dataframe(
@@ -423,13 +463,15 @@ def main():
         
         # Legend
         st.markdown("### 📝 Legend")
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.markdown("✅ **Compliant** - Requirements completed")
+            st.markdown("🟢 **Completed** - Compliance requirement completed")
         with col2:
-            st.markdown("⚠️ **Assigned/Pending** - In progress or assigned")
+            st.markdown("🟡 **Pending** - In progress or assigned")
         with col3:
-            st.markdown("❌ **Non-compliant** - Requirements not met")
+            st.markdown("🔴 **Non-compliant** - Requirements not met")
+        with col4:
+            st.markdown("⚪ **Not Required** - Not applicable for this shift")
         
         # Additional insights
         st.markdown("---")
@@ -463,31 +505,38 @@ def main():
             st.plotly_chart(fig_shift, use_container_width=True)
         
         # Compliance summary statistics
-        if len(requirement_names) > 0:
+        if len(all_compliance_roles) > 0:
             st.markdown("### 📈 Compliance Summary")
             
-            total_cells = len(matrix_df) * len(requirement_names)
+            # Calculate statistics based on actual compliance data
+            total_applicable_cells = 0
             completed_cells = 0
             pending_cells = 0
             non_compliant_cells = 0
             
-            for req_name in requirement_names:
-                if req_name in matrix_df.columns:
-                    completed_cells += (matrix_df[req_name] == '✓').sum()
-                    pending_cells += (matrix_df[req_name] == '⚠️').sum()
-                    non_compliant_cells += (matrix_df[req_name] == '❌').sum()
+            for role_short_name in all_compliance_roles:
+                if role_short_name in matrix_df.columns:
+                    # Count non-empty cells (applicable requirements)
+                    non_empty = matrix_df[role_short_name] != ''
+                    total_applicable_cells += non_empty.sum()
+                    
+                    # Count different status types
+                    col_data = matrix_df[role_short_name]
+                    completed_cells += col_data.str.lower().isin(['completed', 'complete', 'passed', 'yes', 'true', 'compliant']).sum()
+                    pending_cells += col_data.str.lower().isin(['assigned', 'pending', 'in_progress', 'partial']).sum()
+                    non_compliant_cells += col_data.str.lower().isin(['not_completed', 'failed', 'no', 'false', 'non_compliant']).sum()
             
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Total Compliance Checks", total_cells)
+                st.metric("Total Applicable Requirements", total_applicable_cells)
             with col2:
-                completion_rate = (completed_cells / total_cells * 100) if total_cells > 0 else 0
+                completion_rate = (completed_cells / total_applicable_cells * 100) if total_applicable_cells > 0 else 0
                 st.metric("Completion Rate", f"{completion_rate:.1f}%")
             with col3:
-                pending_rate = (pending_cells / total_cells * 100) if total_cells > 0 else 0
+                pending_rate = (pending_cells / total_applicable_cells * 100) if total_applicable_cells > 0 else 0
                 st.metric("Pending Rate", f"{pending_rate:.1f}%")
             with col4:
-                non_compliant_rate = (non_compliant_cells / total_cells * 100) if total_cells > 0 else 0
+                non_compliant_rate = (non_compliant_cells / total_applicable_cells * 100) if total_applicable_cells > 0 else 0
                 st.metric("Non-compliant Rate", f"{non_compliant_rate:.1f}%")
         
         session.close()
