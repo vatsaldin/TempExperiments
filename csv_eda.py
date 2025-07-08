@@ -1,9 +1,40 @@
-import pandas as pd
+def site_facility_analysis(self):
+        """
+        Analyze site and facility patterns
+        """
+        self.log_text("\n" + "="*60)
+        self.log_text("🏢 SITE & FACILITY ANALYSIS")
+        self.log_text("="*60)
+        
+        if 'SITE_NAME' in self.df.columns:
+            site_counts = self.df['SITE_NAME'].value_counts()
+            self.log_text(f"Total unique sites: {len(site_counts)}")
+            self.log_text("\nTop Sites by Record Count:")
+            for i, (site, count) in enumerate(site_counts.head(10).items(), 1):
+                pct = (count / len(self.df)) * 100
+                self.log_text(f"{i:2}. {site:<20} | {count:4} records ({pct:5.1f}%)")
+        
+        if 'FACILITY_AREA' in self.df.columns:
+            facility_counts = self.df['FACILITY_AREA'].value_counts()
+            self.log_text(f"\nTotal unique facility areas: {len(facility_counts)}")
+            self.log_text("\nTop Facility Areas:")
+            for i, (facility, count) in enumerate(facility_counts.head(10).items(), 1):
+                pct = (count / len(self.df)) * 100
+                self.log_text(f"{i:2}. {facility:<25} | {count:4} records ({pct:5.1f}%)")
+        
+        # Site-Facility cross-analysis
+        if 'SITE_NAME' in self.df.columns and 'FACILITY_AREA' in self.df.columns:
+            self.log_text(f"\nSite-Facility Combinations:")
+            site_facility = self.df.groupby(['SITE_NAME', 'FACILITY_AREA']).size().sort_valuesimport pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from collections import Counter
 import warnings
+import os
+from datetime import datetime
+import io
+import sys
 warnings.filterwarnings('ignore')
 
 # Set style for better visualizations
@@ -13,15 +44,78 @@ sns.set_palette("husl")
 class CSVExploratoryAnalysis:
     """
     Comprehensive EDA class for risk assessment/compliance data
+    Saves all outputs to local 'analysis' folder
     """
     
     def __init__(self, file_path):
         """
-        Initialize with CSV file path
+        Initialize with CSV file path and create analysis folder
         """
         self.file_path = file_path
         self.df = None
+        self.analysis_folder = "analysis"
+        self.text_output = []
+        self.chart_counter = 1
+        
+        # Create analysis folder
+        self.create_analysis_folder()
+        
+        # Initialize text output file
+        self.text_file_path = os.path.join(self.analysis_folder, "analysis_report.txt")
+        
+        # Load data
         self.load_data()
+    
+    def create_analysis_folder(self):
+        """
+        Create analysis folder if it doesn't exist
+        """
+        if not os.path.exists(self.analysis_folder):
+            os.makedirs(self.analysis_folder)
+            print(f"✅ Created '{self.analysis_folder}' folder")
+        else:
+            print(f"📁 Using existing '{self.analysis_folder}' folder")
+    
+    def log_text(self, text):
+        """
+        Log text to both console and text file
+        """
+        print(text)
+        self.text_output.append(text)
+    
+    def save_text_output(self):
+        """
+        Save all text output to file
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        header = f"""
+{'='*80}
+CSV EXPLORATORY DATA ANALYSIS REPORT
+Generated on: {timestamp}
+Dataset: {self.file_path}
+{'='*80}
+
+"""
+        
+        with open(self.text_file_path, 'w', encoding='utf-8') as f:
+            f.write(header)
+            f.write('\n'.join(self.text_output))
+        
+        print(f"\n💾 Text analysis saved to: {self.text_file_path}")
+    
+    def save_chart(self, filename_prefix, title=""):
+        """
+        Save current matplotlib figure to analysis folder
+        """
+        filename = f"{self.chart_counter:02d}_{filename_prefix}.png"
+        filepath = os.path.join(self.analysis_folder, filename)
+        
+        plt.savefig(filepath, dpi=300, bbox_inches='tight', 
+                   facecolor='white', edgecolor='none')
+        print(f"📊 Chart saved: {filename}")
+        self.chart_counter += 1
+        
+        return filepath
     
     def load_data(self):
         """
@@ -29,44 +123,46 @@ class CSVExploratoryAnalysis:
         """
         try:
             self.df = pd.read_csv(self.file_path)
-            print(f"✅ Data loaded successfully!")
-            print(f"Dataset shape: {self.df.shape}")
+            self.log_text(f"✅ Data loaded successfully!")
+            self.log_text(f"Dataset shape: {self.df.shape}")
         except Exception as e:
-            print(f"❌ Error loading data: {e}")
+            self.log_text(f"❌ Error loading data: {e}")
             return
     
     def basic_info(self):
         """
         Display basic information about the dataset
         """
-        print("\n" + "="*60)
-        print("📊 BASIC DATASET INFORMATION")
-        print("="*60)
+        self.log_text("\n" + "="*60)
+        self.log_text("📊 BASIC DATASET INFORMATION")
+        self.log_text("="*60)
         
-        print(f"Shape: {self.df.shape}")
-        print(f"Memory Usage: {self.df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+        self.log_text(f"Shape: {self.df.shape}")
+        self.log_text(f"Memory Usage: {self.df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
         
-        print("\n📋 Column Information:")
-        print("-" * 40)
+        self.log_text("\n📋 Column Information:")
+        self.log_text("-" * 40)
         for i, col in enumerate(self.df.columns, 1):
             dtype = self.df[col].dtype
             null_count = self.df[col].isnull().sum()
             null_pct = (null_count / len(self.df)) * 100
-            print(f"{i:2}. {col:<20} | {str(dtype):<10} | Nulls: {null_count} ({null_pct:.1f}%)")
+            self.log_text(f"{i:2}. {col:<20} | {str(dtype):<10} | Nulls: {null_count} ({null_pct:.1f}%)")
         
-        print(f"\n📈 Data Types Summary:")
-        print(self.df.dtypes.value_counts())
+        self.log_text(f"\n📈 Data Types Summary:")
+        dtype_summary = self.df.dtypes.value_counts().to_string()
+        self.log_text(dtype_summary)
         
-        print(f"\n🔍 First 3 rows:")
-        print(self.df.head(3).to_string())
+        self.log_text(f"\n🔍 First 3 rows:")
+        first_rows = self.df.head(3).to_string()
+        self.log_text(first_rows)
     
     def data_quality_assessment(self):
         """
         Comprehensive data quality analysis
         """
-        print("\n" + "="*60)
-        print("🔍 DATA QUALITY ASSESSMENT")
-        print("="*60)
+        self.log_text("\n" + "="*60)
+        self.log_text("🔍 DATA QUALITY ASSESSMENT")
+        self.log_text("="*60)
         
         # Missing values analysis
         missing_data = pd.DataFrame({
@@ -76,19 +172,19 @@ class CSVExploratoryAnalysis:
             'Data_Type': self.df.dtypes
         }).sort_values('Missing_Percentage', ascending=False)
         
-        print("\n📉 Missing Values Summary:")
-        print(missing_data.to_string(index=False))
+        self.log_text("\n📉 Missing Values Summary:")
+        self.log_text(missing_data.to_string(index=False))
         
         # Duplicate analysis
         duplicate_count = self.df.duplicated().sum()
-        print(f"\n🔄 Duplicate Rows: {duplicate_count} ({(duplicate_count/len(self.df)*100):.2f}%)")
+        self.log_text(f"\n🔄 Duplicate Rows: {duplicate_count} ({(duplicate_count/len(self.df)*100):.2f}%)")
         
         # Unique values per column
-        print(f"\n🆔 Unique Values per Column:")
+        self.log_text(f"\n🆔 Unique Values per Column:")
         unique_counts = self.df.nunique().sort_values(ascending=False)
         for col, count in unique_counts.items():
             pct = (count / len(self.df)) * 100
-            print(f"{col:<20}: {count:5} unique ({pct:.1f}%)")
+            self.log_text(f"{col:<20}: {count:5} unique ({pct:.1f}%)")
         
         # Data quality visualization
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
@@ -118,36 +214,37 @@ class CSVExploratoryAnalysis:
         axes[1,1].set_ylim(0, 100)
         
         plt.tight_layout()
+        self.save_chart("data_quality_overview", "Data Quality Analysis")
         plt.show()
     
     def categorical_analysis(self):
         """
         Analyze categorical columns
         """
-        print("\n" + "="*60)
-        print("📊 CATEGORICAL DATA ANALYSIS")
-        print("="*60)
+        self.log_text("\n" + "="*60)
+        self.log_text("📊 CATEGORICAL DATA ANALYSIS")
+        self.log_text("="*60)
         
         # Identify categorical columns
         categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
         
-        print(f"Categorical Columns: {categorical_cols}")
+        self.log_text(f"Categorical Columns: {categorical_cols}")
         
         # Analyze each categorical column
         for col in categorical_cols:
-            print(f"\n🏷️ Column: {col}")
-            print("-" * 40)
+            self.log_text(f"\n🏷️ Column: {col}")
+            self.log_text("-" * 40)
             
             value_counts = self.df[col].value_counts()
-            print(f"Unique values: {len(value_counts)}")
-            print(f"Most common value: '{value_counts.index[0]}' ({value_counts.iloc[0]} times)")
+            self.log_text(f"Unique values: {len(value_counts)}")
+            self.log_text(f"Most common value: '{value_counts.index[0]}' ({value_counts.iloc[0]} times)")
             
             # Show top 10 values
-            print("\nTop 10 values:")
+            self.log_text("\nTop 10 values:")
             top_values = value_counts.head(10)
             for idx, (value, count) in enumerate(top_values.items(), 1):
                 pct = (count / len(self.df)) * 100
-                print(f"{idx:2}. {str(value):<30} | {count:4} ({pct:5.1f}%)")
+                self.log_text(f"{idx:2}. {str(value):<30} | {count:4} ({pct:5.1f}%)")
         
         # Visualizations for categorical data
         n_cols = len(categorical_cols)
@@ -178,6 +275,7 @@ class CSVExploratoryAnalysis:
                 fig.delaxes(axes[-1, -1])
             
             plt.tight_layout()
+            self.save_chart("categorical_distributions", "Categorical Data Distributions")
             plt.show()
     
     def response_analysis(self):
@@ -185,17 +283,17 @@ class CSVExploratoryAnalysis:
         Specific analysis for RESPONSE column (assuming YES/NO type responses)
         """
         if 'RESPONSE' in self.df.columns:
-            print("\n" + "="*60)
-            print("✅ RESPONSE ANALYSIS")
-            print("="*60)
+            self.log_text("\n" + "="*60)
+            self.log_text("✅ RESPONSE ANALYSIS")
+            self.log_text("="*60)
             
             response_counts = self.df['RESPONSE'].value_counts()
             response_pct = self.df['RESPONSE'].value_counts(normalize=True) * 100
             
-            print("Response Distribution:")
+            self.log_text("Response Distribution:")
             for response, count in response_counts.items():
                 pct = response_pct[response]
-                print(f"{response:<15}: {count:4} ({pct:5.1f}%)")
+                self.log_text(f"{response:<15}: {count:4} ({pct:5.1f}%)")
             
             # Response by other categorical variables
             categorical_cols = ['SITE_NAME', 'FACILITY_AREA', 'AUTHOR_NAME', 'TEMPLATE_NAME']
@@ -219,6 +317,7 @@ class CSVExploratoryAnalysis:
                     axes[i].legend(title='Response')
             
             plt.tight_layout()
+            self.save_chart("response_analysis", "Response Pattern Analysis")
             plt.show()
     
     def author_analysis(self):
@@ -226,19 +325,19 @@ class CSVExploratoryAnalysis:
         Analyze author patterns and productivity
         """
         if 'AUTHOR_NAME' in self.df.columns:
-            print("\n" + "="*60)
-            print("👤 AUTHOR ANALYSIS")
-            print("="*60)
+            self.log_text("\n" + "="*60)
+            self.log_text("👤 AUTHOR ANALYSIS")
+            self.log_text("="*60)
             
             author_stats = self.df['AUTHOR_NAME'].value_counts()
-            print(f"Total unique authors: {len(author_stats)}")
-            print(f"Most active author: {author_stats.index[0]} ({author_stats.iloc[0]} records)")
-            print(f"Average records per author: {author_stats.mean():.1f}")
+            self.log_text(f"Total unique authors: {len(author_stats)}")
+            self.log_text(f"Most active author: {author_stats.index[0]} ({author_stats.iloc[0]} records)")
+            self.log_text(f"Average records per author: {author_stats.mean():.1f}")
             
-            print("\nTop 10 Most Active Authors:")
+            self.log_text("\nTop 10 Most Active Authors:")
             for i, (author, count) in enumerate(author_stats.head(10).items(), 1):
                 pct = (count / len(self.df)) * 100
-                print(f"{i:2}. {author:<25} | {count:4} records ({pct:5.1f}%)")
+                self.log_text(f"{i:2}. {author:<25} | {count:4} records ({pct:5.1f}%)")
             
             # Author productivity visualization
             fig, axes = plt.subplots(1, 2, figsize=(15, 6))
@@ -255,6 +354,7 @@ class CSVExploratoryAnalysis:
             axes[1].set_ylabel('Number of Authors')
             
             plt.tight_layout()
+            self.save_chart("author_analysis", "Author Productivity Analysis")
             plt.show()
     
     def site_facility_analysis(self):
@@ -283,9 +383,9 @@ class CSVExploratoryAnalysis:
         
         # Site-Facility cross-analysis
         if 'SITE_NAME' in self.df.columns and 'FACILITY_AREA' in self.df.columns:
-            print(f"\nSite-Facility Combinations:")
+            self.log_text(f"\nSite-Facility Combinations:")
             site_facility = self.df.groupby(['SITE_NAME', 'FACILITY_AREA']).size().sort_values(ascending=False)
-            print(site_facility.head(10).to_string())
+            self.log_text(site_facility.head(10).to_string())
             
             # Visualization
             fig, axes = plt.subplots(2, 2, figsize=(15, 10))
@@ -326,6 +426,7 @@ class CSVExploratoryAnalysis:
             axes[1,1].set_ylabel('Number of Sites')
             
             plt.tight_layout()
+            self.save_chart("site_facility_analysis", "Site and Facility Analysis")
             plt.show()
     
     def template_analysis(self):
@@ -333,17 +434,17 @@ class CSVExploratoryAnalysis:
         Analyze assessment templates
         """
         if 'TEMPLATE_NAME' in self.df.columns:
-            print("\n" + "="*60)
-            print("📋 TEMPLATE ANALYSIS")
-            print("="*60)
+            self.log_text("\n" + "="*60)
+            self.log_text("📋 TEMPLATE ANALYSIS")
+            self.log_text("="*60)
             
             template_counts = self.df['TEMPLATE_NAME'].value_counts()
-            print(f"Total unique templates: {len(template_counts)}")
+            self.log_text(f"Total unique templates: {len(template_counts)}")
             
-            print("\nTemplate Usage:")
+            self.log_text("\nTemplate Usage:")
             for i, (template, count) in enumerate(template_counts.items(), 1):
                 pct = (count / len(self.df)) * 100
-                print(f"{i:2}. {str(template)[:50]:<52} | {count:4} ({pct:5.1f}%)")
+                self.log_text(f"{i:2}. {str(template)[:50]:<52} | {count:4} ({pct:5.1f}%)")
             
             # Template visualization
             plt.figure(figsize=(12, 8))
@@ -351,6 +452,7 @@ class CSVExploratoryAnalysis:
             plt.title('Template Usage Distribution')
             plt.xlabel('Number of Records')
             plt.tight_layout()
+            self.save_chart("template_analysis", "Template Usage Analysis")
             plt.show()
     
     def comment_analysis(self):
@@ -358,29 +460,29 @@ class CSVExploratoryAnalysis:
         Analyze comment patterns and text length
         """
         if 'COMMENT' in self.df.columns:
-            print("\n" + "="*60)
-            print("💬 COMMENT ANALYSIS")
-            print("="*60)
+            self.log_text("\n" + "="*60)
+            self.log_text("💬 COMMENT ANALYSIS")
+            self.log_text("="*60)
             
             # Basic comment statistics
             comments = self.df['COMMENT'].dropna()
-            print(f"Total comments: {len(comments)}")
-            print(f"Comments with data: {len(comments)} ({len(comments)/len(self.df)*100:.1f}%)")
+            self.log_text(f"Total comments: {len(comments)}")
+            self.log_text(f"Comments with data: {len(comments)} ({len(comments)/len(self.df)*100:.1f}%)")
             
             if len(comments) > 0:
                 # Comment length analysis
                 comment_lengths = comments.str.len()
-                print(f"\nComment Length Statistics:")
-                print(f"Average length: {comment_lengths.mean():.1f} characters")
-                print(f"Median length: {comment_lengths.median():.1f} characters")
-                print(f"Min length: {comment_lengths.min()}")
-                print(f"Max length: {comment_lengths.max()}")
+                self.log_text(f"\nComment Length Statistics:")
+                self.log_text(f"Average length: {comment_lengths.mean():.1f} characters")
+                self.log_text(f"Median length: {comment_lengths.median():.1f} characters")
+                self.log_text(f"Min length: {comment_lengths.min()}")
+                self.log_text(f"Max length: {comment_lengths.max()}")
                 
                 # Word count analysis
                 word_counts = comments.str.split().str.len()
-                print(f"\nWord Count Statistics:")
-                print(f"Average words: {word_counts.mean():.1f}")
-                print(f"Median words: {word_counts.median():.1f}")
+                self.log_text(f"\nWord Count Statistics:")
+                self.log_text(f"Average words: {word_counts.mean():.1f}")
+                self.log_text(f"Median words: {word_counts.median():.1f}")
                 
                 # Visualization
                 fig, axes = plt.subplots(2, 2, figsize=(15, 10))
@@ -415,29 +517,30 @@ class CSVExploratoryAnalysis:
                 axes[1,1].set_title('Comment Availability')
                 
                 plt.tight_layout()
+                self.save_chart("comment_analysis", "Comment Analysis")
                 plt.show()
                 
                 # Show sample long and short comments
-                print(f"\nSample Long Comment ({comment_lengths.max()} chars):")
+                self.log_text(f"\nSample Long Comment ({comment_lengths.max()} chars):")
                 long_comment_idx = comment_lengths.idxmax()
-                print(f"'{comments.loc[long_comment_idx][:200]}...'")
+                self.log_text(f"'{comments.loc[long_comment_idx][:200]}...'")
                 
-                print(f"\nSample Short Comment ({comment_lengths.min()} chars):")
+                self.log_text(f"\nSample Short Comment ({comment_lengths.min()} chars):")
                 short_comment_idx = comment_lengths.idxmin()
-                print(f"'{comments.loc[short_comment_idx]}'")
+                self.log_text(f"'{comments.loc[short_comment_idx]}'")
     
     def correlation_analysis(self):
         """
         Analyze correlations between categorical variables
         """
-        print("\n" + "="*60)
-        print("🔗 CORRELATION ANALYSIS")
-        print("="*60)
+        self.log_text("\n" + "="*60)
+        self.log_text("🔗 CORRELATION ANALYSIS")
+        self.log_text("="*60)
         
         categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
         
         if len(categorical_cols) >= 2:
-            print("Cross-tabulation analysis between key variables:")
+            self.log_text("Cross-tabulation analysis between key variables:")
             
             # Key relationships to analyze
             relationships = [
@@ -450,73 +553,73 @@ class CSVExploratoryAnalysis:
             
             for col1, col2 in relationships:
                 if col1 in self.df.columns and col2 in self.df.columns:
-                    print(f"\n{col1} vs {col2}:")
+                    self.log_text(f"\n{col1} vs {col2}:")
                     crosstab = pd.crosstab(self.df[col1], self.df[col2])
-                    print(crosstab.head())
+                    self.log_text(crosstab.head().to_string())
                     
                     # Chi-square test if applicable
                     try:
                         from scipy.stats import chi2_contingency
                         chi2, p_value, dof, expected = chi2_contingency(crosstab)
-                        print(f"Chi-square test p-value: {p_value:.4f}")
+                        self.log_text(f"Chi-square test p-value: {p_value:.4f}")
                         if p_value < 0.05:
-                            print("Significant association detected!")
+                            self.log_text("Significant association detected!")
                     except:
-                        print("Chi-square test not available")
+                        self.log_text("Chi-square test not available")
     
     def generate_summary_report(self):
         """
         Generate a comprehensive summary report
         """
-        print("\n" + "="*80)
-        print("📊 EXECUTIVE SUMMARY REPORT")
-        print("="*80)
+        self.log_text("\n" + "="*80)
+        self.log_text("📊 EXECUTIVE SUMMARY REPORT")
+        self.log_text("="*80)
         
-        print(f"Dataset Overview:")
-        print(f"• Total Records: {len(self.df):,}")
-        print(f"• Total Columns: {len(self.df.columns)}")
-        print(f"• Data Quality: {((1 - self.df.isnull().sum().sum() / (len(self.df) * len(self.df.columns))) * 100):.1f}% complete")
+        self.log_text(f"Dataset Overview:")
+        self.log_text(f"• Total Records: {len(self.df):,}")
+        self.log_text(f"• Total Columns: {len(self.df.columns)}")
+        self.log_text(f"• Data Quality: {((1 - self.df.isnull().sum().sum() / (len(self.df) * len(self.df.columns))) * 100):.1f}% complete")
         
         if 'SITE_NAME' in self.df.columns:
-            print(f"• Unique Sites: {self.df['SITE_NAME'].nunique()}")
+            self.log_text(f"• Unique Sites: {self.df['SITE_NAME'].nunique()}")
         
         if 'FACILITY_AREA' in self.df.columns:
-            print(f"• Unique Facility Areas: {self.df['FACILITY_AREA'].nunique()}")
+            self.log_text(f"• Unique Facility Areas: {self.df['FACILITY_AREA'].nunique()}")
         
         if 'AUTHOR_NAME' in self.df.columns:
-            print(f"• Unique Authors: {self.df['AUTHOR_NAME'].nunique()}")
+            self.log_text(f"• Unique Authors: {self.df['AUTHOR_NAME'].nunique()}")
         
         if 'TEMPLATE_NAME' in self.df.columns:
-            print(f"• Unique Templates: {self.df['TEMPLATE_NAME'].nunique()}")
+            self.log_text(f"• Unique Templates: {self.df['TEMPLATE_NAME'].nunique()}")
         
         if 'RESPONSE' in self.df.columns:
             response_dist = self.df['RESPONSE'].value_counts(normalize=True) * 100
-            print(f"\nResponse Distribution:")
+            self.log_text(f"\nResponse Distribution:")
             for response, pct in response_dist.items():
-                print(f"• {response}: {pct:.1f}%")
+                self.log_text(f"• {response}: {pct:.1f}%")
         
-        print(f"\nData Quality Issues:")
+        self.log_text(f"\nData Quality Issues:")
         missing_cols = self.df.columns[self.df.isnull().any()].tolist()
         if missing_cols:
-            print(f"• Columns with missing data: {', '.join(missing_cols)}")
+            self.log_text(f"• Columns with missing data: {', '.join(missing_cols)}")
         else:
-            print("• No missing data detected")
+            self.log_text("• No missing data detected")
         
         duplicates = self.df.duplicated().sum()
         if duplicates > 0:
-            print(f"• Duplicate rows: {duplicates}")
+            self.log_text(f"• Duplicate rows: {duplicates}")
         else:
-            print("• No duplicate rows detected")
+            self.log_text("• No duplicate rows detected")
     
     def run_full_analysis(self):
         """
         Run the complete EDA pipeline
         """
         if self.df is None:
-            print("❌ No data loaded. Please check file path.")
+            self.log_text("❌ No data loaded. Please check file path.")
             return
         
-        print("🚀 Starting Comprehensive EDA Analysis...")
+        self.log_text("🚀 Starting Comprehensive EDA Analysis...")
         
         self.basic_info()
         self.data_quality_assessment()
@@ -529,9 +632,83 @@ class CSVExploratoryAnalysis:
         self.correlation_analysis()
         self.generate_summary_report()
         
-        print(f"\n✅ Analysis Complete!")
-        print(f"📁 Dataset: {self.file_path}")
-        print(f"📊 Records Analyzed: {len(self.df):,}")
+        # Save all text output to file
+        self.save_text_output()
+        
+        self.log_text(f"\n✅ Analysis Complete!")
+        self.log_text(f"📁 Dataset: {self.file_path}")
+        self.log_text(f"📊 Records Analyzed: {len(self.df):,}")
+        self.log_text(f"📁 Charts saved to: {self.analysis_folder}/")
+        self.log_text(f"📄 Text report saved to: {self.text_file_path}")
+        
+        # Create summary file with file locations
+        self.create_file_summary()
+
+    
+    def create_file_summary(self):
+        """
+        Create a summary file listing all generated files
+        """
+        summary_path = os.path.join(self.analysis_folder, "file_summary.txt")
+        
+        # Get list of all files in analysis folder
+        analysis_files = os.listdir(self.analysis_folder)
+        chart_files = [f for f in analysis_files if f.endswith('.png')]
+        
+        summary_content = f"""
+EDA ANALYSIS FILES SUMMARY
+Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Dataset: {self.file_path}
+
+📊 CHARTS GENERATED ({len(chart_files)} files):
+{'='*50}
+"""
+        
+        for i, chart_file in enumerate(sorted(chart_files), 1):
+            summary_content += f"{i:2}. {chart_file}\n"
+        
+        summary_content += f"""
+📄 TEXT REPORTS:
+{'='*50}
+1. analysis_report.txt - Complete text analysis
+2. file_summary.txt - This file summary
+
+📁 FOLDER STRUCTURE:
+{'='*50}
+analysis/
+├── analysis_report.txt     (Complete text analysis)
+├── file_summary.txt        (This summary)
+"""
+        
+        for chart_file in sorted(chart_files):
+            summary_content += f"├── {chart_file}\n"
+        
+        summary_content += f"""
+🔧 USAGE:
+{'='*50}
+- Open analysis_report.txt for complete text analysis
+- View PNG files for charts and visualizations
+- All files are saved in high resolution (300 DPI)
+- Charts are optimized for presentations and reports
+
+📊 ANALYSIS SECTIONS:
+{'='*50}
+1. Basic Dataset Information
+2. Data Quality Assessment
+3. Categorical Data Analysis
+4. Response Pattern Analysis
+5. Author Productivity Analysis
+6. Site & Facility Analysis
+7. Template Usage Analysis
+8. Comment Analysis
+9. Correlation Analysis
+10. Executive Summary Report
+"""
+        
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            f.write(summary_content)
+        
+        print(f"📋 File summary saved to: {summary_path}")
 
 # Example usage
 if __name__ == "__main__":
@@ -558,3 +735,10 @@ if __name__ == "__main__":
     print("4. Run: python csv_eda.py")
     print("5. For Jupyter: Create analyzer = CSVExploratoryAnalysis('file.csv')")
     print("6. Then run: analyzer.run_full_analysis()")
+    print("")
+    print("📁 OUTPUT FILES:")
+    print("• analysis/analysis_report.txt - Complete text analysis")
+    print("• analysis/*.png - All charts and visualizations")
+    print("• analysis/file_summary.txt - Summary of all generated files")
+    print("")
+    print("✨ All outputs are automatically saved to 'analysis' folder!")
