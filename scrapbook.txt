@@ -1,102 +1,1124 @@
-def create_data_quality_dashboard(df):
-    """Create interactive data quality dashboard"""
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import Counter
+import warnings
+import os
+from datetime import datetime
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.io as pio
+
+# BERTopic and related libraries
+from bertopic import BERTopic
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import umap
+
+# Additional text processing libraries
+import re
+from wordcloud import WordCloud
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+
+# Try to download required NLTK data
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+    nltk.data.find('corpora/wordnet')
+except LookupError:
+    print("Downloading required NLTK data...")
+    nltk.download('punkt', quiet=True)
+    nltk.download('stopwords', quiet=True)
+    nltk.download('wordnet', quiet=True)
+
+warnings.filterwarnings('ignore')
+
+class BERTopicEDAAnalyzer:
+    """
+    Enhanced EDA analyzer with BERTopic integration for topic modeling and clustering
+    """
     
-    # Missing values analysis
-    missing_data = pd.DataFrame({
-        'Column': df.columns,
-        'Missing_Count': df.isnull().sum(),
-        'Missing_Percentage': (df.isnull().sum() / len(df)) * 100,
-        'Data_Type': df.dtypes
-    }).sort_values('Missing_Percentage', ascending=False)
-    
-    # Create subplots with proper specs
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=('Missing Values by Column', 'Data Type Distribution', 
-                       'Missing Values Heatmap', 'Data Completeness'),
-        specs=[[{"secondary_y": False}, {"secondary_y": False}],
-               [{"secondary_y": False}, {"secondary_y": False}]]
-    )
-    
-    # Missing values bar chart
-    fig.add_trace(
-        go.Bar(x=missing_data['Column'], y=missing_data['Missing_Percentage'],
-               name='Missing %', marker_color='red', opacity=0.7),
-        row=1, col=1
-    )
-    
-    # Data type distribution - Changed to bar chart to avoid pie chart compatibility issues
-    dtype_counts = df.dtypes.value_counts()
-    fig.add_trace(
-        go.Bar(x=dtype_counts.index.astype(str), y=dtype_counts.values,
-               name='Data Types', marker_color='lightblue', opacity=0.7),
-        row=1, col=2
-    )
-    
-    # Missing values heatmap (sample)
-    sample_df = df.head(100)  # Sample for visualization
-    missing_matrix = sample_df.isnull().astype(int)
-    
-    fig.add_trace(
-        go.Heatmap(z=missing_matrix.values.T, 
-                   y=missing_matrix.columns,
-                   colorscale='Reds',
-                   showscale=False,
-                   name='Missing Pattern'),
-        row=2, col=1
-    )
-    
-    # Completeness score
-    completeness = (1 - df.isnull().sum() / len(df)) * 100
-    fig.add_trace(
-        go.Bar(x=completeness.index, y=completeness.values,
-               name='Completeness %', marker_color='green', opacity=0.7),
-        row=2, col=2
-    )
-    
-    # Update layout and axis labels
-    fig.update_xaxes(title_text="Columns", row=1, col=1)
-    fig.update_yaxes(title_text="Missing %", row=1, col=1)
-    fig.update_xaxes(title_text="Data Types", row=1, col=2)
-    fig.update_yaxes(title_text="Count", row=1, col=2)
-    fig.update_xaxes(title_text="Row Index", row=2, col=1)
-    fig.update_yaxes(title_text="Columns", row=2, col=1)
-    fig.update_xaxes(title_text="Columns", row=2, col=2)
-    fig.update_yaxes(title_text="Completeness %", row=2, col=2)
-    
-    # Rotate x-axis labels for better readability
-    fig.update_xaxes(tickangle=45, row=1, col=1)
-    fig.update_xaxes(tickangle=45, row=1, col=2)
-    fig.update_xaxes(tickangle=45, row=2, col=2)
-    
-    fig.update_layout(height=800, showlegend=False, title_text="Data Quality Dashboard")
-    fig.show()
-    
-    # Create separate pie chart for data types (since it couldn't fit in subplot)
-    print("\n📊 Data Types Distribution (Pie Chart):")
-    fig_pie = px.pie(values=dtype_counts.values, names=dtype_counts.index.astype(str), 
-                     title="Data Types Distribution")
-    fig_pie.show()
-    
-    # Display missing data table
-    print("\n📋 Missing Values Summary Table:")
-    display(missing_data)
-    
-    # Get Claude's insights on data quality
-    if analyzer.client_available:
-        print(f"\n🤖 Claude's Data Quality Assessment:")
-        print("-" * 40)
-        
-        quality_prompt = f"""
-        Based on this missing values analysis:
-        {missing_data.to_string()}
-        
-        What are the main data quality issues? What recommendations do you have for handling missing values?
-        Which columns should I be most concerned about?
+    def __init__(self, df, text_column, analysis_folder="bertopic_analysis"):
         """
+        Initialize BERTopic EDA analyzer
         
-        quality_insights = analyzer.get_claude_insights(quality_prompt)
-        display(Markdown(quality_insights))
-        analyzer.ai_insights['data_quality'] = quality_insights
+        Args:
+            df: pandas DataFrame
+            text_column: name of the text column to analyze
+            analysis_folder: folder to save analysis outputs
+        """
+        self.df = df.copy()
+        self.text_column = text_column
+        self.analysis_folder = analysis_folder
+        self.chart_counter = 1
+        
+        # Initialize components
+        self.topic_model = None
+        self.embeddings = None
+        self.topics = None
+        self.probabilities = None
+        self.documents = None
+        self.processed_docs = None
+        
+        # Results storage
+        self.analysis_results = {}
+        self.topic_info = None
+        
+        # Configuration
+        self.config = {
+            'min_topic_size': 5,
+            'nr_topics': 'auto',
+            'embedding_model': 'all-MiniLM-L6-v2',
+            'language': 'english',
+            'ngram_range': (1, 2),
+            'min_df': 2,
+            'calculate_probabilities': True,
+            'verbose': True
+        }
+        
+        # Create analysis folder
+        self.create_analysis_folder()
+        
+        # Prepare text data
+        self.prepare_text_data()
     
-    return missing_data
+    def create_analysis_folder(self):
+        """Create analysis folder if it doesn't exist"""
+        if not os.path.exists(self.analysis_folder):
+            os.makedirs(self.analysis_folder)
+            print(f"✅ Created '{self.analysis_folder}' folder")
+    
+    def prepare_text_data(self):
+        """Prepare and clean text data for topic modeling"""
+        print("🔤 Preparing text data for topic modeling...")
+        
+        # Extract text column and handle NaN
+        if self.text_column not in self.df.columns:
+            raise ValueError(f"Column '{self.text_column}' not found in DataFrame")
+        
+        # Get non-null text data
+        text_data = self.df[self.text_column].dropna()
+        
+        # Convert to string and filter out empty strings
+        text_data = text_data.astype(str)
+        text_data = text_data[text_data.str.strip() != '']
+        
+        # Store original documents
+        self.documents = text_data.tolist()
+        
+        # Basic text statistics
+        doc_lengths = [len(doc.split()) for doc in self.documents]
+        
+        print(f"📊 Text Data Overview:")
+        print(f"   Total documents: {len(self.documents)}")
+        print(f"   Average words per document: {np.mean(doc_lengths):.1f}")
+        print(f"   Median words per document: {np.median(doc_lengths):.1f}")
+        print(f"   Min words: {min(doc_lengths)}")
+        print(f"   Max words: {max(doc_lengths)}")
+        
+        # Store indices for later mapping
+        self.document_indices = text_data.index.tolist()
+        
+        return self.documents
+    
+    def preprocess_text(self, text):
+        """
+        Preprocess individual text document
+        
+        Args:
+            text: input text string
+            
+        Returns:
+            cleaned text string
+        """
+        if pd.isna(text) or text == '':
+            return ''
+        
+        # Convert to string and lowercase
+        text = str(text).lower()
+        
+        # Remove special characters and digits (keep basic punctuation)
+        text = re.sub(r'[^a-zA-Z\s]', ' ', text)
+        
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove very short words (less than 3 characters)
+        words = text.split()
+        words = [word for word in words if len(word) >= 3]
+        
+        return ' '.join(words)
+    
+    def create_topic_model(self, nr_topics='auto', min_topic_size=5):
+        """
+        Create and train BERTopic model
+        
+        Args:
+            nr_topics: number of topics ('auto' for automatic)
+            min_topic_size: minimum size for a topic
+            
+        Returns:
+            trained BERTopic model
+        """
+        print("🤖 Creating BERTopic model...")
+        
+        # Update configuration
+        self.config['nr_topics'] = nr_topics
+        self.config['min_topic_size'] = min_topic_size
+        
+        # Initialize sentence transformer
+        print(f"📥 Loading embedding model: {self.config['embedding_model']}")
+        sentence_model = SentenceTransformer(self.config['embedding_model'])
+        
+        # Initialize vectorizer with custom settings
+        vectorizer_model = CountVectorizer(
+            ngram_range=self.config['ngram_range'],
+            stop_words=self.config['language'],
+            min_df=self.config['min_df'],
+            max_features=1000
+        )
+        
+        # Initialize BERTopic model
+        self.topic_model = BERTopic(
+            embedding_model=sentence_model,
+            vectorizer_model=vectorizer_model,
+            nr_topics=nr_topics,
+            min_topic_size=min_topic_size,
+            calculate_probabilities=self.config['calculate_probabilities'],
+            verbose=self.config['verbose']
+        )
+        
+        print(f"🎯 Training topic model on {len(self.documents)} documents...")
+        
+        # Fit the model and get topics
+        self.topics, self.probabilities = self.topic_model.fit_transform(self.documents)
+        
+        # Get topic information
+        self.topic_info = self.topic_model.get_topic_info()
+        
+        print(f"✅ Topic modeling complete!")
+        print(f"   Topics discovered: {len(self.topic_info) - 1}")  # -1 for outlier topic
+        print(f"   Outlier documents: {sum(1 for t in self.topics if t == -1)}")
+        
+        return self.topic_model
+    
+    def analyze_topics(self):
+        """Analyze discovered topics and generate insights"""
+        print("📊 Analyzing discovered topics...")
+        
+        if self.topic_model is None:
+            raise ValueError("Topic model not trained. Call create_topic_model() first.")
+        
+        # Get detailed topic information
+        topics_info = []
+        
+        for topic_id in range(len(self.topic_info)):
+            if topic_id == 0 and self.topic_info.iloc[0]['Topic'] == -1:
+                continue  # Skip outlier topic for now
+            
+            topic_num = self.topic_info.iloc[topic_id]['Topic']
+            topic_words = self.topic_model.get_topic(topic_num)
+            topic_docs = [i for i, t in enumerate(self.topics) if t == topic_num]
+            
+            # Get representative documents
+            representative_docs = [self.documents[i] for i in topic_docs[:5]]
+            
+            # Calculate topic statistics
+            topic_stats = {
+                'topic_id': topic_num,
+                'document_count': len(topic_docs),
+                'percentage': (len(topic_docs) / len(self.documents)) * 100,
+                'top_words': [word for word, _ in topic_words[:10]],
+                'word_scores': [score for _, score in topic_words[:10]],
+                'representative_docs': representative_docs,
+                'keywords': ', '.join([word for word, _ in topic_words[:5]])
+            }
+            
+            topics_info.append(topic_stats)
+        
+        # Sort by document count
+        topics_info.sort(key=lambda x: x['document_count'], reverse=True)
+        
+        # Print topic summary
+        print(f"\n📋 Topic Analysis Summary:")
+        print("=" * 80)
+        
+        for i, topic in enumerate(topics_info):
+            print(f"\n🏷️ Topic {topic['topic_id']}: {topic['keywords']}")
+            print(f"   Documents: {topic['document_count']} ({topic['percentage']:.1f}%)")
+            print(f"   Top words: {', '.join(topic['top_words'][:5])}")
+            print(f"   Sample document: {topic['representative_docs'][0][:100]}...")
+        
+        # Handle outliers
+        outlier_count = sum(1 for t in self.topics if t == -1)
+        if outlier_count > 0:
+            outlier_pct = (outlier_count / len(self.documents)) * 100
+            print(f"\n🔍 Outlier Topic (-1):")
+            print(f"   Documents: {outlier_count} ({outlier_pct:.1f}%)")
+            print(f"   Description: Documents that don't fit well into any topic")
+        
+        self.analysis_results['topics_info'] = topics_info
+        self.analysis_results['outlier_count'] = outlier_count
+        
+        return topics_info
+    
+    def create_topic_visualizations(self):
+        """Create comprehensive topic visualizations"""
+        print("📊 Creating topic visualizations...")
+        
+        if self.topic_model is None:
+            raise ValueError("Topic model not trained. Call create_topic_model() first.")
+        
+        # 1. Topic distribution bar chart
+        fig, axes = plt.subplots(2, 2, figsize=(20, 16))
+        fig.suptitle('BERTopic Analysis Dashboard', fontsize=16, fontweight='bold')
+        
+        # Topic distribution
+        topic_counts = pd.Series(self.topics).value_counts().sort_index()
+        
+        # Remove outlier topic for main chart
+        topic_counts_main = topic_counts[topic_counts.index != -1]
+        
+        bars = axes[0, 0].bar(range(len(topic_counts_main)), topic_counts_main.values, 
+                             color='steelblue', alpha=0.7)
+        axes[0, 0].set_title('Document Distribution by Topic')
+        axes[0, 0].set_xlabel('Topic ID')
+        axes[0, 0].set_ylabel('Number of Documents')
+        axes[0, 0].set_xticks(range(len(topic_counts_main)))
+        axes[0, 0].set_xticklabels(topic_counts_main.index)
+        
+        # Add value labels on bars
+        for bar, value in zip(bars, topic_counts_main.values):
+            height = bar.get_height()
+            axes[0, 0].text(bar.get_x() + bar.get_width()/2., height + 0.5,
+                           f'{value}', ha='center', va='bottom')
+        
+        # 2. Topic word importance heatmap
+        try:
+            # Get top words for each topic
+            topics_words = {}
+            for topic_id in topic_counts_main.index:
+                topic_words = self.topic_model.get_topic(topic_id)
+                topics_words[f'Topic {topic_id}'] = dict(topic_words[:10])
+            
+            # Create word importance matrix
+            all_words = set()
+            for words in topics_words.values():
+                all_words.update(words.keys())
+            
+            word_matrix = []
+            topics_labels = []
+            
+            for topic_name, words in topics_words.items():
+                topics_labels.append(topic_name)
+                word_scores = [words.get(word, 0) for word in sorted(all_words)]
+                word_matrix.append(word_scores)
+            
+            # Plot heatmap (show top words only)
+            word_matrix = np.array(word_matrix)
+            
+            # Select top words across all topics
+            word_importance = word_matrix.sum(axis=0)
+            top_word_indices = np.argsort(word_importance)[-20:]  # Top 20 words
+            
+            im = axes[0, 1].imshow(word_matrix[:, top_word_indices], cmap='Blues', aspect='auto')
+            axes[0, 1].set_title('Topic-Word Importance Heatmap')
+            axes[0, 1].set_xlabel('Top Words')
+            axes[0, 1].set_ylabel('Topics')
+            axes[0, 1].set_xticks(range(len(top_word_indices)))
+            axes[0, 1].set_xticklabels([sorted(all_words)[i] for i in top_word_indices], 
+                                      rotation=45, ha='right')
+            axes[0, 1].set_yticks(range(len(topics_labels)))
+            axes[0, 1].set_yticklabels(topics_labels)
+            
+            # Add colorbar
+            plt.colorbar(im, ax=axes[0, 1], label='Word Importance')
+            
+        except Exception as e:
+            axes[0, 1].text(0.5, 0.5, f'Error creating heatmap:\n{str(e)}', 
+                           ha='center', va='center', transform=axes[0, 1].transAxes)
+        
+        # 3. Document length distribution by topic
+        doc_lengths_by_topic = {}
+        for i, topic_id in enumerate(self.topics):
+            if topic_id not in doc_lengths_by_topic:
+                doc_lengths_by_topic[topic_id] = []
+            doc_lengths_by_topic[topic_id].append(len(self.documents[i].split()))
+        
+        # Create box plot for main topics
+        main_topics = [t for t in doc_lengths_by_topic.keys() if t != -1][:5]  # Top 5 topics
+        box_data = [doc_lengths_by_topic[t] for t in main_topics]
+        
+        if box_data:
+            bp = axes[1, 0].boxplot(box_data, labels=[f'Topic {t}' for t in main_topics])
+            axes[1, 0].set_title('Document Length Distribution by Topic')
+            axes[1, 0].set_xlabel('Topics')
+            axes[1, 0].set_ylabel('Document Length (words)')
+            axes[1, 0].tick_params(axis='x', rotation=45)
+        
+        # 4. Topic coherence/quality metrics
+        try:
+            # Calculate topic diversity (how different topics are)
+            topic_diversity = []
+            topic_labels = []
+            
+            for topic_id in topic_counts_main.index:
+                topic_words = self.topic_model.get_topic(topic_id)
+                # Calculate diversity as inverse of word score concentration
+                word_scores = [score for _, score in topic_words]
+                diversity = 1 / (np.std(word_scores) + 0.001)  # Add small constant to avoid division by zero
+                topic_diversity.append(diversity)
+                topic_labels.append(f'Topic {topic_id}')
+            
+            bars = axes[1, 1].bar(range(len(topic_diversity)), topic_diversity, 
+                                 color='lightcoral', alpha=0.7)
+            axes[1, 1].set_title('Topic Diversity Index')
+            axes[1, 1].set_xlabel('Topics')
+            axes[1, 1].set_ylabel('Diversity Score')
+            axes[1, 1].set_xticks(range(len(topic_labels)))
+            axes[1, 1].set_xticklabels(topic_labels, rotation=45)
+            
+            # Add value labels
+            for bar, value in zip(bars, topic_diversity):
+                height = bar.get_height()
+                axes[1, 1].text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                               f'{value:.2f}', ha='center', va='bottom')
+        
+        except Exception as e:
+            axes[1, 1].text(0.5, 0.5, f'Error calculating diversity:\n{str(e)}', 
+                           ha='center', va='center', transform=axes[1, 1].transAxes)
+        
+        plt.tight_layout()
+        
+        # Save the plot
+        filepath = os.path.join(self.analysis_folder, f"{self.chart_counter:02d}_topic_analysis_dashboard.png")
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        print(f"📊 Topic analysis dashboard saved: {filepath}")
+        self.chart_counter += 1
+        
+        plt.show()
+    
+    def create_topic_wordclouds(self):
+        """Create word clouds for each topic"""
+        print("☁️ Creating topic word clouds...")
+        
+        if self.topic_model is None:
+            raise ValueError("Topic model not trained. Call create_topic_model() first.")
+        
+        # Get main topics (exclude outliers)
+        topic_counts = pd.Series(self.topics).value_counts().sort_values(ascending=False)
+        main_topics = [t for t in topic_counts.index if t != -1][:6]  # Top 6 topics
+        
+        # Create subplots for word clouds
+        n_topics = len(main_topics)
+        cols = 3
+        rows = (n_topics + cols - 1) // cols
+        
+        fig, axes = plt.subplots(rows, cols, figsize=(18, 6 * rows))
+        fig.suptitle('Topic Word Clouds', fontsize=16, fontweight='bold')
+        
+        if n_topics == 1:
+            axes = [axes]
+        elif rows == 1:
+            axes = axes.reshape(1, -1)
+        
+        for i, topic_id in enumerate(main_topics):
+            row = i // cols
+            col = i % cols
+            
+            if rows == 1:
+                ax = axes[col]
+            else:
+                ax = axes[row, col]
+            
+            # Get topic words and their frequencies
+            topic_words = self.topic_model.get_topic(topic_id)
+            
+            if topic_words:
+                # Create word frequency dictionary
+                word_freq = {word: score for word, score in topic_words}
+                
+                # Create word cloud
+                wordcloud = WordCloud(
+                    width=400, height=300,
+                    background_color='white',
+                    colormap='viridis',
+                    max_words=50,
+                    relative_scaling=0.5,
+                    random_state=42
+                ).generate_from_frequencies(word_freq)
+                
+                ax.imshow(wordcloud, interpolation='bilinear')
+                ax.axis('off')
+                
+                # Get topic keywords for title
+                keywords = ', '.join([word for word, _ in topic_words[:3]])
+                doc_count = topic_counts[topic_id]
+                ax.set_title(f'Topic {topic_id}: {keywords}\n({doc_count} documents)', 
+                           fontsize=12, fontweight='bold')
+            else:
+                ax.text(0.5, 0.5, f'No words found\nfor Topic {topic_id}', 
+                       ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(f'Topic {topic_id}')
+        
+        # Hide empty subplots
+        for i in range(n_topics, rows * cols):
+            row = i // cols
+            col = i % cols
+            if rows == 1:
+                axes[col].axis('off')
+            else:
+                axes[row, col].axis('off')
+        
+        plt.tight_layout()
+        
+        # Save the plot
+        filepath = os.path.join(self.analysis_folder, f"{self.chart_counter:02d}_topic_wordclouds.png")
+        plt.savefig(filepath, dpi=300, bbox_inches='tight')
+        print(f"☁️ Topic word clouds saved: {filepath}")
+        self.chart_counter += 1
+        
+        plt.show()
+    
+    def create_topic_embeddings_visualization(self):
+        """Create 2D visualization of document embeddings colored by topic"""
+        print("🎨 Creating topic embeddings visualization...")
+        
+        if self.topic_model is None:
+            raise ValueError("Topic model not trained. Call create_topic_model() first.")
+        
+        try:
+            # Get embeddings if not already computed
+            if self.embeddings is None:
+                print("🔢 Computing document embeddings...")
+                embedding_model = SentenceTransformer(self.config['embedding_model'])
+                self.embeddings = embedding_model.encode(self.documents)
+            
+            # Reduce dimensionality for visualization
+            print("📉 Reducing dimensionality with UMAP...")
+            
+            # Use UMAP for better topic separation
+            reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.1)
+            embeddings_2d = reducer.fit_transform(self.embeddings)
+            
+            # Create scatter plot
+            fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+            fig.suptitle('Document Embeddings Visualization', fontsize=16, fontweight='bold')
+            
+            # Plot 1: Colored by topic
+            scatter = axes[0].scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], 
+                                     c=self.topics, cmap='tab10', alpha=0.7, s=20)
+            axes[0].set_title('Documents Colored by Topic')
+            axes[0].set_xlabel('UMAP Dimension 1')
+            axes[0].set_ylabel('UMAP Dimension 2')
+            
+            # Add colorbar
+            cbar = plt.colorbar(scatter, ax=axes[0])
+            cbar.set_label('Topic ID')
+            
+            # Plot 2: Topic centroids
+            topic_centroids = {}
+            for topic_id in set(self.topics):
+                if topic_id != -1:  # Exclude outliers
+                    topic_points = embeddings_2d[np.array(self.topics) == topic_id]
+                    if len(topic_points) > 0:
+                        centroid = np.mean(topic_points, axis=0)
+                        topic_centroids[topic_id] = centroid
+            
+            # Plot all points in gray
+            axes[1].scatter(embeddings_2d[:, 0], embeddings_2d[:, 1], 
+                           c='lightgray', alpha=0.3, s=10)
+            
+            # Plot centroids
+            for topic_id, centroid in topic_centroids.items():
+                axes[1].scatter(centroid[0], centroid[1], 
+                               s=200, alpha=0.8, 
+                               label=f'Topic {topic_id}')
+                axes[1].annotate(f'Topic {topic_id}', 
+                               (centroid[0], centroid[1]), 
+                               xytext=(5, 5), textcoords='offset points',
+                               fontsize=10, fontweight='bold')
+            
+            axes[1].set_title('Topic Centroids')
+            axes[1].set_xlabel('UMAP Dimension 1')
+            axes[1].set_ylabel('UMAP Dimension 2')
+            axes[1].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            
+            plt.tight_layout()
+            
+            # Save the plot
+            filepath = os.path.join(self.analysis_folder, f"{self.chart_counter:02d}_topic_embeddings.png")
+            plt.savefig(filepath, dpi=300, bbox_inches='tight')
+            print(f"🎨 Topic embeddings visualization saved: {filepath}")
+            self.chart_counter += 1
+            
+            plt.show()
+            
+        except Exception as e:
+            print(f"❌ Error creating embeddings visualization: {e}")
+            print("This might be due to missing dependencies. Install with: pip install umap-learn")
+    
+    def analyze_topic_evolution(self, time_column=None):
+        """Analyze how topics change over time"""
+        print("📈 Analyzing topic evolution over time...")
+        
+        if time_column is None or time_column not in self.df.columns:
+            print("⚠️ No time column specified or found. Skipping temporal analysis.")
+            return
+        
+        if self.topic_model is None:
+            raise ValueError("Topic model not trained. Call create_topic_model() first.")
+        
+        try:
+            # Get time data for documents that have topics
+            doc_times = []
+            doc_topics = []
+            
+            for i, doc_idx in enumerate(self.document_indices):
+                if i < len(self.topics):
+                    time_val = self.df.loc[doc_idx, time_column]
+                    if pd.notna(time_val):
+                        doc_times.append(time_val)
+                        doc_topics.append(self.topics[i])
+            
+            # Convert to DataFrame for easier analysis
+            evolution_df = pd.DataFrame({
+                'time': doc_times,
+                'topic': doc_topics
+            })
+            
+            # Convert time to datetime if it's not already
+            if not pd.api.types.is_datetime64_any_dtype(evolution_df['time']):
+                evolution_df['time'] = pd.to_datetime(evolution_df['time'], errors='coerce')
+            
+            # Remove rows with invalid dates
+            evolution_df = evolution_df.dropna(subset=['time'])
+            
+            if len(evolution_df) == 0:
+                print("⚠️ No valid time data found for temporal analysis.")
+                return
+            
+            # Group by time periods (monthly)
+            evolution_df['time_period'] = evolution_df['time'].dt.to_period('M')
+            
+            # Calculate topic distribution over time
+            topic_evolution = evolution_df.groupby(['time_period', 'topic']).size().unstack(fill_value=0)
+            
+            # Calculate percentages
+            topic_evolution_pct = topic_evolution.div(topic_evolution.sum(axis=1), axis=0) * 100
+            
+            # Create visualization
+            fig, axes = plt.subplots(2, 1, figsize=(16, 12))
+            fig.suptitle('Topic Evolution Over Time', fontsize=16, fontweight='bold')
+            
+            # Plot 1: Absolute counts
+            main_topics = [col for col in topic_evolution.columns if col != -1][:5]  # Top 5 topics
+            
+            for topic_id in main_topics:
+                if topic_id in topic_evolution.columns:
+                    axes[0].plot(topic_evolution.index.to_timestamp(), 
+                               topic_evolution[topic_id], 
+                               marker='o', linewidth=2, label=f'Topic {topic_id}')
+            
+            axes[0].set_title('Topic Document Counts Over Time')
+            axes[0].set_xlabel('Time Period')
+            axes[0].set_ylabel('Number of Documents')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # Plot 2: Percentage distribution
+            topic_evolution_pct[main_topics].plot(kind='area', ax=axes[1], 
+                                                 stacked=True, alpha=0.7)
+            axes[1].set_title('Topic Distribution Percentage Over Time')
+            axes[1].set_xlabel('Time Period')
+            axes[1].set_ylabel('Percentage of Documents')
+            axes[1].legend(title='Topics', bbox_to_anchor=(1.05, 1), loc='upper left')
+            axes[1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # Save the plot
+            filepath = os.path.join(self.analysis_folder, f"{self.chart_counter:02d}_topic_evolution.png")
+            plt.savefig(filepath, dpi=300, bbox_inches='tight')
+            print(f"📈 Topic evolution visualization saved: {filepath}")
+            self.chart_counter += 1
+            
+            plt.show()
+            
+            # Store results
+            self.analysis_results['topic_evolution'] = {
+                'evolution_df': evolution_df,
+                'topic_evolution': topic_evolution,
+                'topic_evolution_pct': topic_evolution_pct
+            }
+            
+        except Exception as e:
+            print(f"❌ Error in temporal analysis: {e}")
+    
+    def generate_topic_insights_report(self):
+        """Generate comprehensive topic insights report"""
+        print("📋 Generating topic insights report...")
+        
+        if self.topic_model is None:
+            raise ValueError("Topic model not trained. Call create_topic_model() first.")
+        
+        # Create comprehensive report
+        report_lines = []
+        report_lines.append("="*80)
+        report_lines.append("BERTOPIC ANALYSIS REPORT")
+        report_lines.append("="*80)
+        report_lines.append(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report_lines.append(f"Text Column: {self.text_column}")
+        report_lines.append(f"Total Documents: {len(self.documents)}")
+        report_lines.append(f"Topics Discovered: {len(self.topic_info) - 1}")
+        report_lines.append("")
+        
+        # Model configuration
+        report_lines.append("MODEL CONFIGURATION:")
+        report_lines.append("-" * 40)
+        for key, value in self.config.items():
+            report_lines.append(f"{key}: {value}")
+        report_lines.append("")
+        
+        # Topic analysis
+        if 'topics_info' in self.analysis_results:
+            report_lines.append("TOPIC ANALYSIS:")
+            report_lines.append("-" * 40)
+            
+            for topic in self.analysis_results['topics_info']:
+                report_lines.append(f"\nTopic {topic['topic_id']}: {topic['keywords']}")
+                report_lines.append(f"  Documents: {topic['document_count']} ({topic['percentage']:.1f}%)")
+                report_lines.append(f"  Top words: {', '.join(topic['top_words'])}")
+                report_lines.append(f"  Word scores: {[f'{score:.3f}' for score in topic['word_scores']]}")
+                report_lines.append(f"  Representative document: {topic['representative_docs'][0][:150]}...")
+        
+        # Outlier analysis
+        if 'outlier_count' in self.analysis_results:
+            outlier_count = self.analysis_results['outlier_count']
+            outlier_pct = (outlier_count / len(self.documents)) * 100
+            report_lines.append(f"\nOUTLIER ANALYSIS:")
+            report_lines.append(f"  Outlier documents: {outlier_count} ({outlier_pct:.1f}%)")
+            report_lines.append(f"  These documents don't fit well into any discovered topic")
+        
+        # Topic quality metrics
+        report_lines.append(f"\nTOPIC QUALITY METRICS:")
+        report_lines.append("-" * 40)
+        
+        # Calculate topic coherence (simplified)
+        topic_coherence_scores = []
+        for topic_id in range(len(self.topic_info)):
+            if self.topic_info.iloc[topic_id]['Topic'] != -1:
+                topic_words = self.topic_model.get_topic(self.topic_info.iloc[topic_id]['Topic'])
+                if topic_words:
+                    # Simple coherence measure: average word score
+                    avg_score = np.mean([score for _, score in topic_words[:5]])
+                    topic_coherence_scores.append(avg_score)
+        
+        if topic_coherence_scores:
+            report_lines.append(f"  Average topic coherence: {np.mean(topic_coherence_scores):.3f}")
+            report_lines.append(f"  Topic coherence std: {np.std(topic_coherence_scores):.3f}")
+        
+        # Recommendations
+        report_lines.append(f"\nRECOMMENDATIONS:")
+        report_lines.append("-" * 40)
+        
+        outlier_pct = (self.analysis_results.get('outlier_count', 0) / len(self.documents)) * 100
+        
+        if outlier_pct > 30:
+            report_lines.append("⚠️  High outlier percentage (>30%)")
+            report_lines.append("   Consider: Reduce min_topic_size or increase nr_topics")
+        elif outlier_pct > 15:
+            report_lines.append("⚠️  Moderate outlier percentage (15-30%)")
+            report_lines.append("   Consider: Fine-tune model parameters")
+        else:
+            report_lines.append("✅ Low outlier percentage (<15%) - Good topic separation")
+        
+        num_topics = len(self.topic_info) - 1
+        if num_topics > 20:
+            report_lines.append("⚠️  Many topics discovered (>20)")
+            report_lines.append("   Consider: Increase min_topic_size or reduce nr_topics")
+        elif num_topics < 3:
+            report_lines.append("⚠️  Few topics discovered (<3)")
+            report_lines.append("   Consider: Decrease min_topic_size or check data quality")
+        else:
+            report_lines.append(f"✅ Reasonable number of topics ({num_topics})")
+        
+        # Document length analysis
+        doc_lengths = [len(doc.split()) for doc in self.documents]
+        avg_length = np.mean(doc_lengths)
+        
+        if avg_length < 10:
+            report_lines.append("⚠️  Short documents (avg < 10 words)")
+            report_lines.append("   Consider: Combine related documents or use different approach")
+        elif avg_length > 500:
+            report_lines.append("⚠️  Long documents (avg > 500 words)")
+            report_lines.append("   Consider: Split documents or use hierarchical topic modeling")
+        else:
+            report_lines.append(f"✅ Good document length (avg: {avg_length:.1f} words)")
+        
+        # Save report
+        report_content = "\n".join(report_lines)
+        report_path = os.path.join(self.analysis_folder, "bertopic_insights_report.txt")
+        
+        with open(report_path, 'w', encoding='utf-8') as f:
+            f.write(report_content)
+        
+        print(f"📄 Topic insights report saved: {report_path}")
+        print("\n" + "="*60)
+        print("KEY INSIGHTS SUMMARY:")
+        print("="*60)
+        print(report_content.split("RECOMMENDATIONS:")[1] if "RECOMMENDATIONS:" in report_content else "Report generated successfully")
+        
+        return report_content
+    
+    def extract_topics_for_dataframe(self):
+        """Extract topic information and add to original dataframe"""
+        print("📊 Extracting topic information for integration...")
+        
+        if self.topic_model is None:
+            raise ValueError("Topic model not trained. Call create_topic_model() first.")
+        
+        # Create a copy of the original dataframe
+        df_with_topics = self.df.copy()
+        
+        # Initialize topic columns
+        df_with_topics['topic_id'] = -2  # -2 indicates no topic assigned
+        df_with_topics['topic_probability'] = 0.0
+        df_with_topics['topic_keywords'] = ''
+        df_with_topics['topic_description'] = ''
+        
+        # Map topics back to original dataframe
+        for i, doc_idx in enumerate(self.document_indices):
+            if i < len(self.topics):
+                topic_id = self.topics[i]
+                topic_prob = self.probabilities[i] if self.probabilities is not None else 0.0
+                
+                # Get topic keywords
+                if topic_id != -1:
+                    topic_words = self.topic_model.get_topic(topic_id)
+                    keywords = ', '.join([word for word, _ in topic_words[:5]])
+                    description = f"Topic {topic_id}: {keywords}"
+                else:
+                    keywords = "Outlier"
+                    description = "Outlier Topic"
+                
+                df_with_topics.loc[doc_idx, 'topic_id'] = topic_id
+                df_with_topics.loc[doc_idx, 'topic_probability'] = topic_prob
+                df_with_topics.loc[doc_idx, 'topic_keywords'] = keywords
+                df_with_topics.loc[doc_idx, 'topic_description'] = description
+        
+        # Add topic statistics
+        topic_stats = df_with_topics['topic_id'].value_counts().to_dict()
+        df_with_topics['topic_size'] = df_with_topics['topic_id'].map(topic_stats)
+        
+        # Save enhanced dataframe
+        output_path = os.path.join(self.analysis_folder, "data_with_topics.csv")
+        df_with_topics.to_csv(output_path, index=False)
+        
+        print(f"📁 Enhanced dataframe saved: {output_path}")
+        print(f"📊 New columns added: topic_id, topic_probability, topic_keywords, topic_description, topic_size")
+        
+        return df_with_topics
+    
+    def run_complete_topic_analysis(self, nr_topics='auto', min_topic_size=5, time_column=None):
+        """Run complete BERTopic analysis pipeline"""
+        print("🚀 Starting Complete BERTopic Analysis Pipeline...")
+        print("="*60)
+        
+        try:
+            # Step 1: Create topic model
+            print("Step 1: Creating topic model...")
+            self.create_topic_model(nr_topics=nr_topics, min_topic_size=min_topic_size)
+            
+            # Step 2: Analyze topics
+            print("\nStep 2: Analyzing topics...")
+            self.analyze_topics()
+            
+            # Step 3: Create visualizations
+            print("\nStep 3: Creating visualizations...")
+            self.create_topic_visualizations()
+            self.create_topic_wordclouds()
+            self.create_topic_embeddings_visualization()
+            
+            # Step 4: Temporal analysis (if time column provided)
+            if time_column:
+                print("\nStep 4: Analyzing topic evolution...")
+                self.analyze_topic_evolution(time_column)
+            
+            # Step 5: Generate insights report
+            print("\nStep 5: Generating insights report...")
+            self.generate_topic_insights_report()
+            
+            # Step 6: Extract topics for dataframe
+            print("\nStep 6: Extracting topics for integration...")
+            df_with_topics = self.extract_topics_for_dataframe()
+            
+            print(f"\n✅ Complete BERTopic Analysis Finished!")
+            print(f"📁 All outputs saved to: {self.analysis_folder}/")
+            print(f"📊 Topics discovered: {len(self.topic_info) - 1}")
+            print(f"📈 Visualizations created: {self.chart_counter - 1}")
+            
+            return {
+                'topic_model': self.topic_model,
+                'topics': self.topics,
+                'probabilities': self.probabilities,
+                'topic_info': self.topic_info,
+                'analysis_results': self.analysis_results,
+                'df_with_topics': df_with_topics
+            }
+            
+        except Exception as e:
+            print(f"❌ Error in topic analysis pipeline: {e}")
+            raise
+
+# Integration functions for the main EDA class
+
+def integrate_bertopic_with_eda(df, text_column, eda_analysis_folder="analysis"):
+    """
+    Integrate BERTopic analysis with existing EDA pipeline
+    
+    Args:
+        df: pandas DataFrame from EDA
+        text_column: name of text column to analyze
+        eda_analysis_folder: folder where EDA results are stored
+        
+    Returns:
+        BERTopic analyzer instance and results
+    """
+    print("🔗 Integrating BERTopic with EDA Pipeline...")
+    
+    # Create BERTopic analysis folder within EDA folder
+    bertopic_folder = os.path.join(eda_analysis_folder, "bertopic_analysis")
+    
+    # Initialize BERTopic analyzer
+    bertopic_analyzer = BERTopicEDAAnalyzer(df, text_column, bertopic_folder)
+    
+    # Run analysis
+    results = bertopic_analyzer.run_complete_topic_analysis()
+    
+    return bertopic_analyzer, results
+
+def create_topic_summary_for_eda(bertopic_analyzer, save_to_folder="analysis"):
+    """
+    Create a topic summary that integrates with main EDA report
+    
+    Args:
+        bertopic_analyzer: BERTopicEDAAnalyzer instance
+        save_to_folder: folder to save summary
+        
+    Returns:
+        summary text for integration
+    """
+    print("📋 Creating topic summary for EDA integration...")
+    
+    if bertopic_analyzer.topic_model is None:
+        return "No topic analysis available."
+    
+    # Create summary
+    summary_lines = []
+    summary_lines.append("="*60)
+    summary_lines.append("TOPIC MODELING ANALYSIS SUMMARY")
+    summary_lines.append("="*60)
+    
+    # Basic statistics
+    num_topics = len(bertopic_analyzer.topic_info) - 1
+    outlier_count = bertopic_analyzer.analysis_results.get('outlier_count', 0)
+    outlier_pct = (outlier_count / len(bertopic_analyzer.documents)) * 100
+    
+    summary_lines.append(f"Documents analyzed: {len(bertopic_analyzer.documents)}")
+    summary_lines.append(f"Topics discovered: {num_topics}")
+    summary_lines.append(f"Outlier documents: {outlier_count} ({outlier_pct:.1f}%)")
+    summary_lines.append("")
+    
+    # Top topics
+    if 'topics_info' in bertopic_analyzer.analysis_results:
+        summary_lines.append("TOP TOPICS:")
+        for i, topic in enumerate(bertopic_analyzer.analysis_results['topics_info'][:5]):
+            summary_lines.append(f"{i+1}. Topic {topic['topic_id']}: {topic['keywords']}")
+            summary_lines.append(f"   Documents: {topic['document_count']} ({topic['percentage']:.1f}%)")
+        summary_lines.append("")
+    
+    # Key insights
+    summary_lines.append("KEY INSIGHTS:")
+    summary_lines.append("- Use topic information for content categorization")
+    summary_lines.append("- Outlier documents may need special attention")
+    summary_lines.append("- Topic trends can inform content strategy")
+    summary_lines.append("- Topics can be used as features for modeling")
+    
+    # Save summary
+    summary_content = "\n".join(summary_lines)
+    summary_path = os.path.join(save_to_folder, "topic_analysis_summary.txt")
+    
+    with open(summary_path, 'w', encoding='utf-8') as f:
+        f.write(summary_content)
+    
+    print(f"📄 Topic summary saved: {summary_path}")
+    
+    return summary_content
+
+def enhance_eda_with_topic_features(df, bertopic_analyzer):
+    """
+    Enhance EDA dataframe with topic-based features for further analysis
+    
+    Args:
+        df: original dataframe
+        bertopic_analyzer: BERTopicEDAAnalyzer instance
+        
+    Returns:
+        enhanced dataframe with topic features
+    """
+    print("🔧 Enhancing EDA with topic-based features...")
+    
+    if bertopic_analyzer.topic_model is None:
+        print("❌ No topic model available for feature extraction")
+        return df
+    
+    # Get the dataframe with topics
+    df_enhanced = bertopic_analyzer.extract_topics_for_dataframe()
+    
+    # Add additional topic-based features
+    
+    # 1. Topic diversity (how many different topics appear in related documents)
+    if 'SITE_NAME' in df_enhanced.columns:
+        site_topic_diversity = df_enhanced.groupby('SITE_NAME')['topic_id'].nunique()
+        df_enhanced['site_topic_diversity'] = df_enhanced['SITE_NAME'].map(site_topic_diversity)
+    
+    # 2. Topic dominance (percentage of documents in the most common topic)
+    if 'FACILITY_AREA' in df_enhanced.columns:
+        facility_topic_dominance = df_enhanced.groupby('FACILITY_AREA')['topic_id'].apply(
+            lambda x: x.value_counts().iloc[0] / len(x) if len(x) > 0 else 0
+        )
+        df_enhanced['facility_topic_dominance'] = df_enhanced['FACILITY_AREA'].map(facility_topic_dominance)
+    
+    # 3. Topic consistency (how consistent topics are within groups)
+    if 'AUTHOR_NAME' in df_enhanced.columns:
+        author_topic_consistency = df_enhanced.groupby('AUTHOR_NAME')['topic_id'].apply(
+            lambda x: 1 - (x.nunique() / len(x)) if len(x) > 0 else 0
+        )
+        df_enhanced['author_topic_consistency'] = df_enhanced['AUTHOR_NAME'].map(author_topic_consistency)
+    
+    # 4. Binary topic indicators (for top topics)
+    if 'topics_info' in bertopic_analyzer.analysis_results:
+        top_topics = bertopic_analyzer.analysis_results['topics_info'][:5]  # Top 5 topics
+        for topic in top_topics:
+            topic_id = topic['topic_id']
+            col_name = f"is_topic_{topic_id}"
+            df_enhanced[col_name] = (df_enhanced['topic_id'] == topic_id).astype(int)
+    
+    print(f"✅ Enhanced dataframe with {len(df_enhanced.columns) - len(df.columns)} new topic features")
+    
+    return df_enhanced
+
+# Example usage and integration functions
+
+def run_bertopic_eda_integration(csv_file_path, text_column, time_column=None):
+    """
+    Complete integration example: EDA + BERTopic
+    
+    Args:
+        csv_file_path: path to CSV file
+        text_column: name of text column for topic modeling
+        time_column: optional time column for temporal analysis
+        
+    Returns:
+        tuple of (eda_analyzer, bertopic_analyzer, enhanced_df)
+    """
+    print("🚀 Running Complete EDA + BERTopic Integration...")
+    print("="*80)
+    
+    # Load data
+    df = pd.read_csv(csv_file_path)
+    print(f"📊 Data loaded: {df.shape}")
+    
+    # Run basic EDA first (assuming the enhanced EDA class exists)
+    try:
+        from your_eda_module import CSVExploratoryAnalysis  # Replace with actual import
+        eda_analyzer = CSVExploratoryAnalysis(csv_file_path)
+        eda_analyzer.run_enhanced_analysis()
+        
+        # Integrate BERTopic
+        bertopic_analyzer, topic_results = integrate_bertopic_with_eda(
+            df, text_column, eda_analyzer.analysis_folder
+        )
+        
+        # Create integrated summary
+        create_topic_summary_for_eda(bertopic_analyzer, eda_analyzer.analysis_folder)
+        
+        # Enhance dataframe with topic features
+        enhanced_df = enhance_eda_with_topic_features(df, bertopic_analyzer)
+        
+        print(f"\n✅ Complete EDA + BERTopic Integration Finished!")
+        print(f"📁 All outputs saved to: {eda_analyzer.analysis_folder}/")
+        
+        return eda_analyzer, bertopic_analyzer, enhanced_df
+        
+    except ImportError:
+        print("ℹ️ EDA module not found. Running BERTopic analysis only...")
+        
+        # Run BERTopic analysis standalone
+        bertopic_analyzer = BERTopicEDAAnalyzer(df, text_column)
+        topic_results = bertopic_analyzer.run_complete_topic_analysis(time_column=time_column)
+        
+        return None, bertopic_analyzer, topic_results['df_with_topics']
+
+# Example usage
+if __name__ == "__main__":
+    print("="*80)
+    print("BERTOPIC EDA INTEGRATION - EXAMPLE USAGE")
+    print("="*80)
+    
+    # Example parameters - replace with your actual data
+    csv_file = "your_data.csv"
+    text_col = "COMMENT"  # Replace with your text column name
+    time_col = "DATE"     # Replace with your time column name (optional)
+    
+    try:
+        # Method 1: Standalone BERTopic analysis
+        print("\n🔬 Method 1: Standalone BERTopic Analysis")
+        df = pd.read_csv(csv_file)
+        bertopic_analyzer = BERTopicEDAAnalyzer(df, text_col)
+        results = bertopic_analyzer.run_complete_topic_analysis(
+            nr_topics='auto', 
+            min_topic_size=5, 
+            time_column=time_col
+        )
+        
+        # Method 2: Integration with existing EDA
+        print("\n🔗 Method 2: Integration with EDA")
+        eda_analyzer, bertopic_analyzer, enhanced_df = run_bertopic_eda_integration(
+            csv_file, text_col, time_col
+        )
+        
+        print(f"\n🎯 Analysis Complete!")
+        print(f"📊 Original data shape: {df.shape}")
+        print(f"📈 Enhanced data shape: {enhanced_df.shape}")
+        print(f"🏷️ Topics discovered: {len(bertopic_analyzer.topic_info) - 1}")
+        
+    except FileNotFoundError:
+        print(f"❌ File not found: {csv_file}")
+        print("Please update the csv_file variable with your actual file path")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        print("Make sure you have installed required packages:")
+        print("pip install bertopic sentence-transformers umap-learn wordcloud nltk")
+    
+    print("\n" + "="*80)
+    print("BERTOPIC EDA FEATURES:")
+    print("="*80)
+    print("✅ Automatic topic discovery and modeling")
+    print("✅ Interactive visualizations and word clouds")
+    print("✅ Document clustering and similarity analysis")
+    print("✅ Temporal topic evolution tracking")
+    print("✅ Integration with existing EDA pipeline")
+    print("✅ Enhanced dataframe with topic features")
+    print("✅ Comprehensive reporting and insights")
+    print("✅ Model configuration and tuning options")
+    print("\n🚀 Ready to discover topics in your text data!")
