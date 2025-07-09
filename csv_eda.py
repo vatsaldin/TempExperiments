@@ -1,31 +1,4 @@
-def site_facility_analysis(self):
-        """
-        Analyze site and facility patterns
-        """
-        self.log_text("\n" + "="*60)
-        self.log_text("🏢 SITE & FACILITY ANALYSIS")
-        self.log_text("="*60)
-        
-        if 'SITE_NAME' in self.df.columns:
-            site_counts = self.df['SITE_NAME'].value_counts()
-            self.log_text(f"Total unique sites: {len(site_counts)}")
-            self.log_text("\nTop Sites by Record Count:")
-            for i, (site, count) in enumerate(site_counts.head(10).items(), 1):
-                pct = (count / len(self.df)) * 100
-                self.log_text(f"{i:2}. {site:<20} | {count:4} records ({pct:5.1f}%)")
-        
-        if 'FACILITY_AREA' in self.df.columns:
-            facility_counts = self.df['FACILITY_AREA'].value_counts()
-            self.log_text(f"\nTotal unique facility areas: {len(facility_counts)}")
-            self.log_text("\nTop Facility Areas:")
-            for i, (facility, count) in enumerate(facility_counts.head(10).items(), 1):
-                pct = (count / len(self.df)) * 100
-                self.log_text(f"{i:2}. {facility:<25} | {count:4} records ({pct:5.1f}%)")
-        
-        # Site-Facility cross-analysis
-        if 'SITE_NAME' in self.df.columns and 'FACILITY_AREA' in self.df.columns:
-            self.log_text(f"\nSite-Facility Combinations:")
-            site_facility = self.df.groupby(['SITE_NAME', 'FACILITY_AREA']).size().sort_valuesimport pandas as pd
+import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -33,8 +6,6 @@ from collections import Counter
 import warnings
 import os
 from datetime import datetime
-import io
-import sys
 warnings.filterwarnings('ignore')
 
 # Set style for better visualizations
@@ -43,33 +14,31 @@ sns.set_palette("husl")
 
 class CSVExploratoryAnalysis:
     """
-    Comprehensive EDA class for risk assessment/compliance data
-    Saves all outputs to local 'analysis' folder
+    Enhanced EDA class with comprehensive NaN handling for visualizations
     """
     
     def __init__(self, file_path):
-        """
-        Initialize with CSV file path and create analysis folder
-        """
         self.file_path = file_path
         self.df = None
         self.analysis_folder = "analysis"
         self.text_output = []
         self.chart_counter = 1
         
-        # Create analysis folder
+        # NaN handling configuration
+        self.nan_handling_config = {
+            'categorical_nan_label': 'Missing/Unknown',
+            'show_nan_in_charts': True,
+            'nan_color': '#FF6B6B',  # Red color for NaN values
+            'min_category_threshold': 0.01,  # Minimum 1% to show category
+            'max_categories_display': 15  # Maximum categories to show in charts
+        }
+        
         self.create_analysis_folder()
-        
-        # Initialize text output file
         self.text_file_path = os.path.join(self.analysis_folder, "analysis_report.txt")
-        
-        # Load data
         self.load_data()
     
     def create_analysis_folder(self):
-        """
-        Create analysis folder if it doesn't exist
-        """
+        """Create analysis folder if it doesn't exist"""
         if not os.path.exists(self.analysis_folder):
             os.makedirs(self.analysis_folder)
             print(f"✅ Created '{self.analysis_folder}' folder")
@@ -77,89 +46,141 @@ class CSVExploratoryAnalysis:
             print(f"📁 Using existing '{self.analysis_folder}' folder")
     
     def log_text(self, text):
-        """
-        Log text to both console and text file
-        """
+        """Log text to both console and text file"""
         print(text)
         self.text_output.append(text)
     
-    def save_text_output(self):
+    def load_data(self):
+        """Load and initial data inspection"""
+        try:
+            self.df = pd.read_csv(self.file_path)
+            self.log_text(f"✅ Data loaded successfully!")
+            self.log_text(f"Dataset shape: {self.df.shape}")
+            
+            # Log initial NaN statistics
+            total_nan = self.df.isnull().sum().sum()
+            total_cells = self.df.shape[0] * self.df.shape[1]
+            nan_percentage = (total_nan / total_cells) * 100
+            
+            self.log_text(f"📊 NaN Overview: {total_nan:,} missing values ({nan_percentage:.2f}% of total data)")
+            
+        except Exception as e:
+            self.log_text(f"❌ Error loading data: {e}")
+            return
+    
+    def clean_data_for_visualization(self, series, data_type='categorical'):
         """
-        Save all text output to file
+        Clean data series for visualization by handling NaN values appropriately
+        
+        Args:
+            series: pandas Series to clean
+            data_type: 'categorical', 'numerical', or 'text'
+            
+        Returns:
+            cleaned series and metadata about cleaning
         """
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        header = f"""
-{'='*80}
-CSV EXPLORATORY DATA ANALYSIS REPORT
-Generated on: {timestamp}
-Dataset: {self.file_path}
-{'='*80}
-
-"""
+        original_length = len(series)
+        nan_count = series.isnull().sum()
         
-        with open(self.text_file_path, 'w', encoding='utf-8') as f:
-            f.write(header)
-            f.write('\n'.join(self.text_output))
+        cleaning_info = {
+            'original_length': original_length,
+            'nan_count': nan_count,
+            'nan_percentage': (nan_count / original_length) * 100 if original_length > 0 else 0,
+            'cleaning_method': None
+        }
         
-        print(f"\n💾 Text analysis saved to: {self.text_file_path}")
+        if data_type == 'categorical':
+            # For categorical data, replace NaN with descriptive label
+            if self.nan_handling_config['show_nan_in_charts'] and nan_count > 0:
+                cleaned_series = series.fillna(self.nan_handling_config['categorical_nan_label'])
+                cleaning_info['cleaning_method'] = f"NaN values labeled as '{self.nan_handling_config['categorical_nan_label']}'"
+            else:
+                cleaned_series = series.dropna()
+                cleaning_info['cleaning_method'] = "NaN values removed"
+                
+        elif data_type == 'numerical':
+            # For numerical data, typically remove NaN for visualizations
+            cleaned_series = series.dropna()
+            cleaning_info['cleaning_method'] = "NaN values removed for numerical analysis"
+            
+        elif data_type == 'text':
+            # For text data, remove empty/NaN values
+            cleaned_series = series.dropna()
+            # Also remove empty strings
+            cleaned_series = cleaned_series[cleaned_series.astype(str).str.strip() != '']
+            cleaning_info['cleaning_method'] = "NaN and empty values removed"
+            
+        return cleaned_series, cleaning_info
+    
+    def prepare_categorical_for_chart(self, series, max_categories=None):
+        """
+        Prepare categorical data for charting with intelligent NaN handling
+        
+        Args:
+            series: pandas Series with categorical data
+            max_categories: Maximum number of categories to display
+            
+        Returns:
+            dict with chart data and metadata
+        """
+        if max_categories is None:
+            max_categories = self.nan_handling_config['max_categories_display']
+        
+        # Clean the series
+        cleaned_series, cleaning_info = self.clean_data_for_visualization(series, 'categorical')
+        
+        # Get value counts
+        value_counts = cleaned_series.value_counts()
+        total_count = len(cleaned_series)
+        
+        # Filter out categories that are too small
+        min_count = max(1, int(total_count * self.nan_handling_config['min_category_threshold']))
+        significant_categories = value_counts[value_counts >= min_count]
+        
+        # Handle "Other" category for too many categories
+        if len(significant_categories) > max_categories:
+            top_categories = significant_categories.head(max_categories - 1)
+            other_count = significant_categories.iloc[max_categories-1:].sum()
+            
+            if other_count > 0:
+                top_categories['Other'] = other_count
+            
+            chart_data = top_categories
+        else:
+            chart_data = significant_categories
+        
+        # Prepare colors - highlight NaN category if present
+        colors = []
+        nan_label = self.nan_handling_config['categorical_nan_label']
+        
+        for category in chart_data.index:
+            if category == nan_label:
+                colors.append(self.nan_handling_config['nan_color'])
+            else:
+                colors.append(None)  # Use default color
+        
+        return {
+            'data': chart_data,
+            'colors': colors,
+            'cleaning_info': cleaning_info,
+            'total_original': len(series),
+            'total_cleaned': len(cleaned_series)
+        }
     
     def save_chart(self, filename_prefix, title=""):
-        """
-        Save current matplotlib figure to analysis folder
-        """
+        """Save current matplotlib figure to analysis folder"""
         filename = f"{self.chart_counter:02d}_{filename_prefix}.png"
         filepath = os.path.join(self.analysis_folder, filename)
         
         plt.savefig(filepath, dpi=300, bbox_inches='tight', 
                    facecolor='white', edgecolor='none')
-        print(f"📊 Chart saved: {filename}")
+        self.log_text(f"📊 Chart saved: {filename}")
         self.chart_counter += 1
         
         return filepath
     
-    def load_data(self):
-        """
-        Load and initial data inspection
-        """
-        try:
-            self.df = pd.read_csv(self.file_path)
-            self.log_text(f"✅ Data loaded successfully!")
-            self.log_text(f"Dataset shape: {self.df.shape}")
-        except Exception as e:
-            self.log_text(f"❌ Error loading data: {e}")
-            return
-    
-    def basic_info(self):
-        """
-        Display basic information about the dataset
-        """
-        self.log_text("\n" + "="*60)
-        self.log_text("📊 BASIC DATASET INFORMATION")
-        self.log_text("="*60)
-        
-        self.log_text(f"Shape: {self.df.shape}")
-        self.log_text(f"Memory Usage: {self.df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
-        
-        self.log_text("\n📋 Column Information:")
-        self.log_text("-" * 40)
-        for i, col in enumerate(self.df.columns, 1):
-            dtype = self.df[col].dtype
-            null_count = self.df[col].isnull().sum()
-            null_pct = (null_count / len(self.df)) * 100
-            self.log_text(f"{i:2}. {col:<20} | {str(dtype):<10} | Nulls: {null_count} ({null_pct:.1f}%)")
-        
-        self.log_text(f"\n📈 Data Types Summary:")
-        dtype_summary = self.df.dtypes.value_counts().to_string()
-        self.log_text(dtype_summary)
-        
-        self.log_text(f"\n🔍 First 3 rows:")
-        first_rows = self.df.head(3).to_string()
-        self.log_text(first_rows)
-    
     def data_quality_assessment(self):
-        """
-        Comprehensive data quality analysis
-        """
+        """Enhanced data quality analysis with NaN handling"""
         self.log_text("\n" + "="*60)
         self.log_text("🔍 DATA QUALITY ASSESSMENT")
         self.log_text("="*60)
@@ -169,64 +190,127 @@ Dataset: {self.file_path}
             'Column': self.df.columns,
             'Missing_Count': self.df.isnull().sum(),
             'Missing_Percentage': (self.df.isnull().sum() / len(self.df)) * 100,
-            'Data_Type': self.df.dtypes
+            'Data_Type': self.df.dtypes,
+            'Non_Missing_Count': self.df.notnull().sum()
         }).sort_values('Missing_Percentage', ascending=False)
         
         self.log_text("\n📉 Missing Values Summary:")
         self.log_text(missing_data.to_string(index=False))
         
-        # Duplicate analysis
-        duplicate_count = self.df.duplicated().sum()
-        self.log_text(f"\n🔄 Duplicate Rows: {duplicate_count} ({(duplicate_count/len(self.df)*100):.2f}%)")
+        # Enhanced visualization with NaN handling
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('Data Quality Overview with NaN Analysis', fontsize=16, fontweight='bold')
         
-        # Unique values per column
-        self.log_text(f"\n🆔 Unique Values per Column:")
-        unique_counts = self.df.nunique().sort_values(ascending=False)
-        for col, count in unique_counts.items():
-            pct = (count / len(self.df)) * 100
-            self.log_text(f"{col:<20}: {count:5} unique ({pct:.1f}%)")
+        # 1. Missing values heatmap (sample)
+        sample_size = min(100, len(self.df))
+        sample_df = self.df.head(sample_size)
         
-        # Data quality visualization
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle('Data Quality Overview', fontsize=16, fontweight='bold')
+        # Create custom colormap for missing values
+        from matplotlib.colors import ListedColormap
+        colors = ['lightgreen', self.nan_handling_config['nan_color']]
+        cmap = ListedColormap(colors)
         
-        # Missing values heatmap
-        sns.heatmap(self.df.isnull(), ax=axes[0,0], cbar=True, yticklabels=False, 
-                   cmap='viridis', xticklabels=True)
-        axes[0,0].set_title('Missing Values Pattern')
+        sns.heatmap(sample_df.isnull(), ax=axes[0,0], cbar=True, 
+                   yticklabels=False, cmap=cmap, 
+                   xticklabels=True, cbar_kws={'label': 'Missing Values'})
+        axes[0,0].set_title(f'Missing Values Pattern (First {sample_size} rows)')
         axes[0,0].tick_params(axis='x', rotation=45)
         
-        # Missing values bar plot
-        missing_data.set_index('Column')['Missing_Percentage'].plot(kind='bar', ax=axes[0,1])
-        axes[0,1].set_title('Missing Values by Column (%)')
-        axes[0,1].tick_params(axis='x', rotation=45)
+        # 2. Missing values bar plot (only show columns with missing values)
+        missing_cols = missing_data[missing_data['Missing_Count'] > 0]
+        if len(missing_cols) > 0:
+            bars = axes[0,1].bar(range(len(missing_cols)), missing_cols['Missing_Percentage'])
+            axes[0,1].set_title('Missing Values by Column (%)')
+            axes[0,1].set_xlabel('Columns')
+            axes[0,1].set_ylabel('Missing Percentage')
+            axes[0,1].set_xticks(range(len(missing_cols)))
+            axes[0,1].set_xticklabels(missing_cols['Column'], rotation=45)
+            
+            # Color bars based on severity
+            for i, bar in enumerate(bars):
+                pct = missing_cols.iloc[i]['Missing_Percentage']
+                if pct > 50:
+                    bar.set_color('red')
+                elif pct > 20:
+                    bar.set_color('orange')
+                else:
+                    bar.set_color('yellow')
+        else:
+            axes[0,1].text(0.5, 0.5, 'No Missing Values Found!', 
+                          horizontalalignment='center', verticalalignment='center',
+                          transform=axes[0,1].transAxes, fontsize=14, color='green')
+            axes[0,1].set_title('Missing Values Status')
         
-        # Unique values distribution
-        unique_counts.plot(kind='bar', ax=axes[1,0])
-        axes[1,0].set_title('Unique Values per Column')
-        axes[1,0].tick_params(axis='x', rotation=45)
-        
-        # Data completeness
+        # 3. Data completeness by column
         completeness = (1 - self.df.isnull().sum() / len(self.df)) * 100
-        completeness.plot(kind='bar', ax=axes[1,1], color='green', alpha=0.7)
-        axes[1,1].set_title('Data Completeness (%)')
-        axes[1,1].tick_params(axis='x', rotation=45)
-        axes[1,1].set_ylim(0, 100)
+        bars = axes[1,0].bar(range(len(completeness)), completeness.values)
+        axes[1,0].set_title('Data Completeness by Column (%)')
+        axes[1,0].set_xlabel('Columns')
+        axes[1,0].set_ylabel('Completeness Percentage')
+        axes[1,0].set_xticks(range(len(completeness)))
+        axes[1,0].set_xticklabels(completeness.index, rotation=45)
+        axes[1,0].set_ylim(0, 100)
+        
+        # Color bars based on completeness
+        for i, bar in enumerate(bars):
+            pct = completeness.iloc[i]
+            if pct >= 95:
+                bar.set_color('green')
+            elif pct >= 80:
+                bar.set_color('yellow')
+            else:
+                bar.set_color('red')
+        
+        # 4. Overall data quality summary
+        total_cells = self.df.shape[0] * self.df.shape[1]
+        missing_cells = self.df.isnull().sum().sum()
+        quality_score = ((total_cells - missing_cells) / total_cells) * 100
+        
+        # Create a pie chart for overall quality
+        sizes = [quality_score, 100 - quality_score]
+        labels = ['Complete Data', 'Missing Data']
+        colors = ['lightgreen', self.nan_handling_config['nan_color']]
+        
+        axes[1,1].pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
+        axes[1,1].set_title(f'Overall Data Quality Score: {quality_score:.1f}%')
         
         plt.tight_layout()
-        self.save_chart("data_quality_overview", "Data Quality Analysis")
+        self.save_chart("data_quality_enhanced", "Enhanced Data Quality with NaN Analysis")
         plt.show()
+        
+        # Data quality recommendations
+        self.log_text(f"\n💡 Data Quality Recommendations:")
+        
+        high_missing = missing_data[missing_data['Missing_Percentage'] > 50]
+        if len(high_missing) > 0:
+            self.log_text(f"⚠️  High missing data columns (>50%): {', '.join(high_missing['Column'])}")
+            self.log_text(f"   Consider: Drop these columns or investigate data collection process")
+        
+        medium_missing = missing_data[(missing_data['Missing_Percentage'] > 20) & 
+                                     (missing_data['Missing_Percentage'] <= 50)]
+        if len(medium_missing) > 0:
+            self.log_text(f"⚠️  Medium missing data columns (20-50%): {', '.join(medium_missing['Column'])}")
+            self.log_text(f"   Consider: Imputation strategies or special handling")
+        
+        low_missing = missing_data[(missing_data['Missing_Percentage'] > 0) & 
+                                  (missing_data['Missing_Percentage'] <= 20)]
+        if len(low_missing) > 0:
+            self.log_text(f"✅ Low missing data columns (<20%): {', '.join(low_missing['Column'])}")
+            self.log_text(f"   Consider: Simple imputation or case-wise deletion")
+        
+        return missing_data
     
     def categorical_analysis(self):
-        """
-        Analyze categorical columns
-        """
+        """Enhanced categorical analysis with NaN handling"""
         self.log_text("\n" + "="*60)
-        self.log_text("📊 CATEGORICAL DATA ANALYSIS")
+        self.log_text("📊 CATEGORICAL DATA ANALYSIS (Enhanced NaN Handling)")
         self.log_text("="*60)
         
-        # Identify categorical columns
         categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
+        
+        if not categorical_cols:
+            self.log_text("No categorical columns found.")
+            return
         
         self.log_text(f"Categorical Columns: {categorical_cols}")
         
@@ -235,21 +319,28 @@ Dataset: {self.file_path}
             self.log_text(f"\n🏷️ Column: {col}")
             self.log_text("-" * 40)
             
-            value_counts = self.df[col].value_counts()
-            self.log_text(f"Unique values: {len(value_counts)}")
-            self.log_text(f"Most common value: '{value_counts.index[0]}' ({value_counts.iloc[0]} times)")
+            # Prepare data for visualization
+            chart_data = self.prepare_categorical_for_chart(self.df[col])
             
-            # Show top 10 values
-            self.log_text("\nTop 10 values:")
-            top_values = value_counts.head(10)
-            for idx, (value, count) in enumerate(top_values.items(), 1):
-                pct = (count / len(self.df)) * 100
-                self.log_text(f"{idx:2}. {str(value):<30} | {count:4} ({pct:5.1f}%)")
+            # Log statistics
+            cleaning_info = chart_data['cleaning_info']
+            self.log_text(f"Original values: {cleaning_info['original_length']}")
+            self.log_text(f"Missing values: {cleaning_info['nan_count']} ({cleaning_info['nan_percentage']:.1f}%)")
+            self.log_text(f"Cleaning method: {cleaning_info['cleaning_method']}")
+            
+            # Display top values
+            self.log_text(f"\nTop values (after cleaning):")
+            for idx, (value, count) in enumerate(chart_data['data'].items(), 1):
+                pct = (count / chart_data['total_cleaned']) * 100
+                nan_indicator = " 🔴" if value == self.nan_handling_config['categorical_nan_label'] else ""
+                self.log_text(f"{idx:2}. {str(value):<30} | {count:4} ({pct:5.1f}%){nan_indicator}")
         
-        # Visualizations for categorical data
+        # Create enhanced visualizations
         n_cols = len(categorical_cols)
         if n_cols > 0:
-            fig, axes = plt.subplots((n_cols + 1) // 2, 2, figsize=(15, 4 * ((n_cols + 1) // 2)))
+            fig, axes = plt.subplots((n_cols + 1) // 2, 2, figsize=(16, 6 * ((n_cols + 1) // 2)))
+            fig.suptitle('Categorical Data Distribution (Enhanced NaN Handling)', fontsize=16, fontweight='bold')
+            
             if n_cols == 1:
                 axes = [axes]
             elif n_cols <= 2:
@@ -264,481 +355,663 @@ Dataset: {self.file_path}
                 else:
                     ax = axes[row, col_idx]
                 
-                # Plot top 15 values
-                top_15 = self.df[col].value_counts().head(15)
-                top_15.plot(kind='bar', ax=ax)
-                ax.set_title(f'Distribution of {col}')
-                ax.tick_params(axis='x', rotation=45)
+                # Prepare chart data
+                chart_data = self.prepare_categorical_for_chart(self.df[col])
                 
+                # Create bar plot with custom colors
+                bars = ax.bar(range(len(chart_data['data'])), chart_data['data'].values)
+                
+                # Apply colors (highlight NaN categories)
+                for j, (bar, color) in enumerate(zip(bars, chart_data['colors'])):
+                    if color is not None:
+                        bar.set_color(color)
+                
+                ax.set_title(f'{col}\n(Missing: {chart_data["cleaning_info"]["nan_count"]} values)')
+                ax.set_xlabel('Categories')
+                ax.set_ylabel('Count')
+                ax.set_xticks(range(len(chart_data['data'])))
+                ax.set_xticklabels(chart_data['data'].index, rotation=45, ha='right')
+                
+                # Add value labels on bars
+                for j, (bar, value) in enumerate(zip(bars, chart_data['data'].values)):
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height,
+                           f'{value}', ha='center', va='bottom', fontsize=9)
+            
             # Remove empty subplots
             if n_cols % 2 == 1 and n_cols > 1:
                 fig.delaxes(axes[-1, -1])
             
             plt.tight_layout()
-            self.save_chart("categorical_distributions", "Categorical Data Distributions")
+            self.save_chart("categorical_enhanced", "Enhanced Categorical Analysis with NaN Handling")
             plt.show()
     
-    def response_analysis(self):
-        """
-        Specific analysis for RESPONSE column (assuming YES/NO type responses)
-        """
-        if 'RESPONSE' in self.df.columns:
-            self.log_text("\n" + "="*60)
-            self.log_text("✅ RESPONSE ANALYSIS")
-            self.log_text("="*60)
-            
-            response_counts = self.df['RESPONSE'].value_counts()
-            response_pct = self.df['RESPONSE'].value_counts(normalize=True) * 100
-            
-            self.log_text("Response Distribution:")
-            for response, count in response_counts.items():
-                pct = response_pct[response]
-                self.log_text(f"{response:<15}: {count:4} ({pct:5.1f}%)")
-            
-            # Response by other categorical variables
-            categorical_cols = ['SITE_NAME', 'FACILITY_AREA', 'AUTHOR_NAME', 'TEMPLATE_NAME']
-            available_cols = [col for col in categorical_cols if col in self.df.columns]
-            
-            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-            axes = axes.flatten()
-            
-            # Response distribution pie chart
-            self.df['RESPONSE'].value_counts().plot(kind='pie', ax=axes[0], autopct='%1.1f%%')
-            axes[0].set_title('Overall Response Distribution')
-            axes[0].set_ylabel('')
-            
-            # Response by categorical variables
-            for i, col in enumerate(available_cols[:3], 1):
-                if i < 4:
-                    crosstab = pd.crosstab(self.df[col], self.df['RESPONSE'])
-                    crosstab.plot(kind='bar', ax=axes[i], stacked=True)
-                    axes[i].set_title(f'Response by {col}')
-                    axes[i].tick_params(axis='x', rotation=45)
-                    axes[i].legend(title='Response')
-            
-            plt.tight_layout()
-            self.save_chart("response_analysis", "Response Pattern Analysis")
-            plt.show()
-    
-    def author_analysis(self):
-        """
-        Analyze author patterns and productivity
-        """
-        if 'AUTHOR_NAME' in self.df.columns:
-            self.log_text("\n" + "="*60)
-            self.log_text("👤 AUTHOR ANALYSIS")
-            self.log_text("="*60)
-            
-            author_stats = self.df['AUTHOR_NAME'].value_counts()
-            self.log_text(f"Total unique authors: {len(author_stats)}")
-            self.log_text(f"Most active author: {author_stats.index[0]} ({author_stats.iloc[0]} records)")
-            self.log_text(f"Average records per author: {author_stats.mean():.1f}")
-            
-            self.log_text("\nTop 10 Most Active Authors:")
-            for i, (author, count) in enumerate(author_stats.head(10).items(), 1):
-                pct = (count / len(self.df)) * 100
-                self.log_text(f"{i:2}. {author:<25} | {count:4} records ({pct:5.1f}%)")
-            
-            # Author productivity visualization
-            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-            
-            # Top 15 authors
-            author_stats.head(15).plot(kind='bar', ax=axes[0])
-            axes[0].set_title('Top 15 Authors by Record Count')
-            axes[0].tick_params(axis='x', rotation=45)
-            
-            # Author productivity distribution
-            axes[1].hist(author_stats.values, bins=20, alpha=0.7, edgecolor='black')
-            axes[1].set_title('Distribution of Records per Author')
-            axes[1].set_xlabel('Number of Records')
-            axes[1].set_ylabel('Number of Authors')
-            
-            plt.tight_layout()
-            self.save_chart("author_analysis", "Author Productivity Analysis")
-            plt.show()
-    
-    def site_facility_analysis(self):
-        """
-        Analyze site and facility patterns
-        """
-        print("\n" + "="*60)
-        print("🏢 SITE & FACILITY ANALYSIS")
-        print("="*60)
-        
-        if 'SITE_NAME' in self.df.columns:
-            site_counts = self.df['SITE_NAME'].value_counts()
-            print(f"Total unique sites: {len(site_counts)}")
-            print("\nTop Sites by Record Count:")
-            for i, (site, count) in enumerate(site_counts.head(10).items(), 1):
-                pct = (count / len(self.df)) * 100
-                print(f"{i:2}. {site:<20} | {count:4} records ({pct:5.1f}%)")
-        
-        if 'FACILITY_AREA' in self.df.columns:
-            facility_counts = self.df['FACILITY_AREA'].value_counts()
-            print(f"\nTotal unique facility areas: {len(facility_counts)}")
-            print("\nTop Facility Areas:")
-            for i, (facility, count) in enumerate(facility_counts.head(10).items(), 1):
-                pct = (count / len(self.df)) * 100
-                print(f"{i:2}. {facility:<25} | {count:4} records ({pct:5.1f}%)")
-        
-        # Site-Facility cross-analysis
-        if 'SITE_NAME' in self.df.columns and 'FACILITY_AREA' in self.df.columns:
-            self.log_text(f"\nSite-Facility Combinations:")
-            site_facility = self.df.groupby(['SITE_NAME', 'FACILITY_AREA']).size().sort_values(ascending=False)
-            self.log_text(site_facility.head(10).to_string())
-            
-            # Visualization
-            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-            
-            # Site distribution
-            if len(site_counts) <= 20:
-                site_counts.plot(kind='bar', ax=axes[0,0])
-                axes[0,0].tick_params(axis='x', rotation=45)
-            else:
-                site_counts.head(20).plot(kind='bar', ax=axes[0,0])
-                axes[0,0].tick_params(axis='x', rotation=45)
-            axes[0,0].set_title('Records by Site')
-            
-            # Facility distribution
-            if len(facility_counts) <= 20:
-                facility_counts.plot(kind='bar', ax=axes[0,1])
-                axes[0,1].tick_params(axis='x', rotation=45)
-            else:
-                facility_counts.head(20).plot(kind='bar', ax=axes[0,1])
-                axes[0,1].tick_params(axis='x', rotation=45)
-            axes[0,1].set_title('Records by Facility Area')
-            
-            # Heatmap of top site-facility combinations
-            pivot_data = self.df.pivot_table(index='SITE_NAME', columns='FACILITY_AREA', 
-                                           aggfunc='size', fill_value=0)
-            # Select top sites and facilities for readability
-            top_sites = site_counts.head(10).index
-            top_facilities = facility_counts.head(10).index
-            
-            heatmap_data = pivot_data.loc[top_sites, top_facilities]
-            sns.heatmap(heatmap_data, ax=axes[1,0], cmap='YlOrRd', annot=True, fmt='d')
-            axes[1,0].set_title('Site-Facility Heatmap (Top 10 each)')
-            
-            # Distribution of records per site
-            axes[1,1].hist(site_counts.values, bins=15, alpha=0.7, edgecolor='black')
-            axes[1,1].set_title('Distribution of Records per Site')
-            axes[1,1].set_xlabel('Number of Records')
-            axes[1,1].set_ylabel('Number of Sites')
-            
-            plt.tight_layout()
-            self.save_chart("site_facility_analysis", "Site and Facility Analysis")
-            plt.show()
-    
-    def template_analysis(self):
-        """
-        Analyze assessment templates
-        """
-        if 'TEMPLATE_NAME' in self.df.columns:
-            self.log_text("\n" + "="*60)
-            self.log_text("📋 TEMPLATE ANALYSIS")
-            self.log_text("="*60)
-            
-            template_counts = self.df['TEMPLATE_NAME'].value_counts()
-            self.log_text(f"Total unique templates: {len(template_counts)}")
-            
-            self.log_text("\nTemplate Usage:")
-            for i, (template, count) in enumerate(template_counts.items(), 1):
-                pct = (count / len(self.df)) * 100
-                self.log_text(f"{i:2}. {str(template)[:50]:<52} | {count:4} ({pct:5.1f}%)")
-            
-            # Template visualization
-            plt.figure(figsize=(12, 8))
-            template_counts.plot(kind='barh')
-            plt.title('Template Usage Distribution')
-            plt.xlabel('Number of Records')
-            plt.tight_layout()
-            self.save_chart("template_analysis", "Template Usage Analysis")
-            plt.show()
-    
-    def comment_analysis(self):
-        """
-        Analyze comment patterns and text length
-        """
-        if 'COMMENT' in self.df.columns:
-            self.log_text("\n" + "="*60)
-            self.log_text("💬 COMMENT ANALYSIS")
-            self.log_text("="*60)
-            
-            # Basic comment statistics
-            comments = self.df['COMMENT'].dropna()
-            self.log_text(f"Total comments: {len(comments)}")
-            self.log_text(f"Comments with data: {len(comments)} ({len(comments)/len(self.df)*100:.1f}%)")
-            
-            if len(comments) > 0:
-                # Comment length analysis
-                comment_lengths = comments.str.len()
-                self.log_text(f"\nComment Length Statistics:")
-                self.log_text(f"Average length: {comment_lengths.mean():.1f} characters")
-                self.log_text(f"Median length: {comment_lengths.median():.1f} characters")
-                self.log_text(f"Min length: {comment_lengths.min()}")
-                self.log_text(f"Max length: {comment_lengths.max()}")
-                
-                # Word count analysis
-                word_counts = comments.str.split().str.len()
-                self.log_text(f"\nWord Count Statistics:")
-                self.log_text(f"Average words: {word_counts.mean():.1f}")
-                self.log_text(f"Median words: {word_counts.median():.1f}")
-                
-                # Visualization
-                fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-                
-                # Comment length distribution
-                axes[0,0].hist(comment_lengths, bins=30, alpha=0.7, edgecolor='black')
-                axes[0,0].set_title('Distribution of Comment Lengths (Characters)')
-                axes[0,0].set_xlabel('Characters')
-                axes[0,0].set_ylabel('Frequency')
-                
-                # Word count distribution
-                axes[0,1].hist(word_counts, bins=20, alpha=0.7, edgecolor='black', color='green')
-                axes[0,1].set_title('Distribution of Word Counts')
-                axes[0,1].set_xlabel('Words')
-                axes[0,1].set_ylabel('Frequency')
-                
-                # Comment length by response (if available)
-                if 'RESPONSE' in self.df.columns:
-                    for response in self.df['RESPONSE'].unique():
-                        if pd.notna(response):
-                            subset_lengths = self.df[self.df['RESPONSE'] == response]['COMMENT'].str.len().dropna()
-                            axes[1,0].hist(subset_lengths, alpha=0.6, label=response, bins=20)
-                    axes[1,0].set_title('Comment Length by Response Type')
-                    axes[1,0].legend()
-                    axes[1,0].set_xlabel('Characters')
-                    axes[1,0].set_ylabel('Frequency')
-                
-                # Empty vs filled comments
-                comment_status = ['Has Comment', 'No Comment']
-                comment_counts = [len(comments), len(self.df) - len(comments)]
-                axes[1,1].pie(comment_counts, labels=comment_status, autopct='%1.1f%%')
-                axes[1,1].set_title('Comment Availability')
-                
-                plt.tight_layout()
-                self.save_chart("comment_analysis", "Comment Analysis")
-                plt.show()
-                
-                # Show sample long and short comments
-                self.log_text(f"\nSample Long Comment ({comment_lengths.max()} chars):")
-                long_comment_idx = comment_lengths.idxmax()
-                self.log_text(f"'{comments.loc[long_comment_idx][:200]}...'")
-                
-                self.log_text(f"\nSample Short Comment ({comment_lengths.min()} chars):")
-                short_comment_idx = comment_lengths.idxmin()
-                self.log_text(f"'{comments.loc[short_comment_idx]}'")
-    
-    def correlation_analysis(self):
-        """
-        Analyze correlations between categorical variables
-        """
+    def numerical_analysis(self):
+        """Enhanced numerical analysis with NaN handling"""
         self.log_text("\n" + "="*60)
-        self.log_text("🔗 CORRELATION ANALYSIS")
+        self.log_text("📈 NUMERICAL DATA ANALYSIS (Enhanced NaN Handling)")
         self.log_text("="*60)
         
-        categorical_cols = self.df.select_dtypes(include=['object']).columns.tolist()
+        numerical_cols = self.df.select_dtypes(include=[np.number]).columns.tolist()
         
-        if len(categorical_cols) >= 2:
-            self.log_text("Cross-tabulation analysis between key variables:")
+        if not numerical_cols:
+            self.log_text("No numerical columns found.")
+            return
+        
+        # Analyze NaN impact on numerical columns
+        for col in numerical_cols:
+            original_series = self.df[col]
+            cleaned_series, cleaning_info = self.clean_data_for_visualization(original_series, 'numerical')
             
-            # Key relationships to analyze
-            relationships = [
-                ('SITE_NAME', 'RESPONSE'),
-                ('FACILITY_AREA', 'RESPONSE'),
-                ('AUTHOR_NAME', 'RESPONSE'),
-                ('TEMPLATE_NAME', 'RESPONSE'),
-                ('SITE_NAME', 'FACILITY_AREA')
-            ]
+            self.log_text(f"\n📊 Column: {col}")
+            self.log_text(f"   Original values: {cleaning_info['original_length']}")
+            self.log_text(f"   Missing values: {cleaning_info['nan_count']} ({cleaning_info['nan_percentage']:.1f}%)")
+            self.log_text(f"   Available for analysis: {len(cleaned_series)}")
             
-            for col1, col2 in relationships:
-                if col1 in self.df.columns and col2 in self.df.columns:
-                    self.log_text(f"\n{col1} vs {col2}:")
-                    crosstab = pd.crosstab(self.df[col1], self.df[col2])
-                    self.log_text(crosstab.head().to_string())
-                    
-                    # Chi-square test if applicable
-                    try:
-                        from scipy.stats import chi2_contingency
-                        chi2, p_value, dof, expected = chi2_contingency(crosstab)
-                        self.log_text(f"Chi-square test p-value: {p_value:.4f}")
-                        if p_value < 0.05:
-                            self.log_text("Significant association detected!")
-                    except:
-                        self.log_text("Chi-square test not available")
+            if len(cleaned_series) > 0:
+                self.log_text(f"   Mean: {cleaned_series.mean():.2f}")
+                self.log_text(f"   Std: {cleaned_series.std():.2f}")
+                self.log_text(f"   Min: {cleaned_series.min():.2f}")
+                self.log_text(f"   Max: {cleaned_series.max():.2f}")
+        
+        # Create enhanced visualizations
+        n_cols = len(numerical_cols)
+        fig, axes = plt.subplots((n_cols + 2) // 3, 3, figsize=(18, 6 * ((n_cols + 2) // 3)))
+        fig.suptitle('Numerical Data Distribution (NaN Values Excluded)', fontsize=16, fontweight='bold')
+        
+        if n_cols == 1:
+            axes = [axes]
+        elif n_cols <= 3:
+            axes = axes.reshape(1, -1)
+        
+        for i, col in enumerate(numerical_cols):
+            row = i // 3
+            col_idx = i % 3
+            
+            if n_cols == 1:
+                ax = axes[0]
+            else:
+                ax = axes[row, col_idx]
+            
+            # Clean data for visualization
+            cleaned_series, cleaning_info = self.clean_data_for_visualization(self.df[col], 'numerical')
+            
+            if len(cleaned_series) > 0:
+                # Create histogram
+                ax.hist(cleaned_series, bins=30, alpha=0.7, edgecolor='black', color='skyblue')
+                
+                # Add statistics lines
+                mean_val = cleaned_series.mean()
+                median_val = cleaned_series.median()
+                
+                ax.axvline(mean_val, color='red', linestyle='--', alpha=0.8, 
+                          label=f'Mean: {mean_val:.2f}')
+                ax.axvline(median_val, color='green', linestyle='--', alpha=0.8, 
+                          label=f'Median: {median_val:.2f}')
+                
+                # Title with missing value info
+                title = f'{col}\n(Missing: {cleaning_info["nan_count"]} values, {cleaning_info["nan_percentage"]:.1f}%)'
+                ax.set_title(title)
+                ax.set_xlabel(col)
+                ax.set_ylabel('Frequency')
+                ax.legend()
+                
+                # Add text box with statistics
+                stats_text = f'Available: {len(cleaned_series)}\nStd: {cleaned_series.std():.2f}'
+                ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+                       verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            else:
+                ax.text(0.5, 0.5, f'No data available\n(All values are NaN)', 
+                       horizontalalignment='center', verticalalignment='center',
+                       transform=ax.transAxes, fontsize=12, color='red')
+                ax.set_title(f'{col} - No Data Available')
+        
+        # Remove empty subplots
+        for i in range(n_cols, len(axes.flat)):
+            fig.delaxes(axes.flat[i])
+        
+        plt.tight_layout()
+        self.save_chart("numerical_enhanced", "Enhanced Numerical Analysis with NaN Handling")
+        plt.show()
+        
+        # Correlation analysis with NaN handling
+        if len(numerical_cols) > 1:
+            self.log_text("\n🔗 Correlation Analysis (NaN values excluded):")
+            
+            # Create correlation matrix excluding NaN values
+            clean_numeric_df = self.df[numerical_cols].dropna()
+            
+            if len(clean_numeric_df) > 0:
+                correlation_matrix = clean_numeric_df.corr()
+                
+                plt.figure(figsize=(10, 8))
+                
+                # Create mask for better visualization
+                mask = np.triu(np.ones_like(correlation_matrix, dtype=bool))
+                
+                # Generate heatmap
+                sns.heatmap(correlation_matrix, annot=True, cmap='coolwarm', center=0,
+                           square=True, linewidths=0.5, mask=mask, fmt='.3f')
+                
+                plt.title(f'Correlation Matrix (Based on {len(clean_numeric_df)} complete cases)')
+                plt.tight_layout()
+                self.save_chart("correlation_enhanced", "Enhanced Correlation Analysis")
+                plt.show()
+                
+                # Log missing data impact on correlation
+                original_length = len(self.df)
+                available_for_corr = len(clean_numeric_df)
+                excluded_pct = ((original_length - available_for_corr) / original_length) * 100
+                
+                self.log_text(f"   Original rows: {original_length}")
+                self.log_text(f"   Complete cases: {available_for_corr}")
+                self.log_text(f"   Excluded due to NaN: {original_length - available_for_corr} ({excluded_pct:.1f}%)")
+            else:
+                self.log_text("   ⚠️ No complete cases available for correlation analysis")
     
-    def generate_summary_report(self):
-        """
-        Generate a comprehensive summary report
-        """
-        self.log_text("\n" + "="*80)
-        self.log_text("📊 EXECUTIVE SUMMARY REPORT")
-        self.log_text("="*80)
-        
-        self.log_text(f"Dataset Overview:")
-        self.log_text(f"• Total Records: {len(self.df):,}")
-        self.log_text(f"• Total Columns: {len(self.df.columns)}")
-        self.log_text(f"• Data Quality: {((1 - self.df.isnull().sum().sum() / (len(self.df) * len(self.df.columns))) * 100):.1f}% complete")
-        
-        if 'SITE_NAME' in self.df.columns:
-            self.log_text(f"• Unique Sites: {self.df['SITE_NAME'].nunique()}")
-        
-        if 'FACILITY_AREA' in self.df.columns:
-            self.log_text(f"• Unique Facility Areas: {self.df['FACILITY_AREA'].nunique()}")
-        
-        if 'AUTHOR_NAME' in self.df.columns:
-            self.log_text(f"• Unique Authors: {self.df['AUTHOR_NAME'].nunique()}")
-        
-        if 'TEMPLATE_NAME' in self.df.columns:
-            self.log_text(f"• Unique Templates: {self.df['TEMPLATE_NAME'].nunique()}")
-        
+    def response_analysis(self):
+        """Enhanced response analysis with NaN handling"""
         if 'RESPONSE' in self.df.columns:
-            response_dist = self.df['RESPONSE'].value_counts(normalize=True) * 100
-            self.log_text(f"\nResponse Distribution:")
-            for response, pct in response_dist.items():
-                self.log_text(f"• {response}: {pct:.1f}%")
-        
-        self.log_text(f"\nData Quality Issues:")
-        missing_cols = self.df.columns[self.df.isnull().any()].tolist()
-        if missing_cols:
-            self.log_text(f"• Columns with missing data: {', '.join(missing_cols)}")
-        else:
-            self.log_text("• No missing data detected")
-        
-        duplicates = self.df.duplicated().sum()
-        if duplicates > 0:
-            self.log_text(f"• Duplicate rows: {duplicates}")
-        else:
-            self.log_text("• No duplicate rows detected")
+            self.log_text("\n" + "="*60)
+            self.log_text("✅ RESPONSE ANALYSIS (Enhanced NaN Handling)")
+            self.log_text("="*60)
+            
+            # Prepare response data
+            chart_data = self.prepare_categorical_for_chart(self.df['RESPONSE'])
+            
+            self.log_text("Response Distribution (after NaN handling):")
+            for response, count in chart_data['data'].items():
+                pct = (count / chart_data['total_cleaned']) * 100
+                nan_indicator = " 🔴" if response == self.nan_handling_config['categorical_nan_label'] else ""
+                self.log_text(f"{response:<20}: {count:4} ({pct:5.1f}%){nan_indicator}")
+            
+            # Enhanced visualization
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+            fig.suptitle('Response Analysis with NaN Handling', fontsize=16, fontweight='bold')
+            
+            # 1. Response distribution pie chart
+            colors = ['lightblue', 'lightgreen', 'lightcoral', self.nan_handling_config['nan_color']]
+            colors = colors[:len(chart_data['data'])]
+            
+            axes[0,0].pie(chart_data['data'].values, labels=chart_data['data'].index, 
+                         autopct='%1.1f%%', colors=colors, startangle=90)
+            axes[0,0].set_title('Response Distribution')
+            
+            # 2. Response bar chart
+            bars = axes[0,1].bar(range(len(chart_data['data'])), chart_data['data'].values)
+            axes[0,1].set_title('Response Count')
+            axes[0,1].set_xlabel('Response Type')
+            axes[0,1].set_ylabel('Count')
+            axes[0,1].set_xticks(range(len(chart_data['data'])))
+            axes[0,1].set_xticklabels(chart_data['data'].index, rotation=45)
+            
+            # Color bars to highlight NaN
+            for i, (bar, color) in enumerate(zip(bars, chart_data['colors'])):
+                if color is not None:
+                    bar.set_color(color)
+            
+            # 3. Response by other categorical variables (if available)
+            categorical_cols = ['SITE_NAME', 'FACILITY_AREA', 'AUTHOR_NAME']
+            available_cols = [col for col in categorical_cols if col in self.df.columns]
+            
+            if available_cols:
+                # Create cross-tabulation with NaN handling
+                for i, col in enumerate(available_cols[:2]):
+                    ax = axes[1, i]
+                    
+                    # Prepare both columns for cross-tabulation
+                    response_clean = self.df['RESPONSE'].fillna(self.nan_handling_config['categorical_nan_label'])
+                    col_clean = self.df[col].fillna(self.nan_handling_config['categorical_nan_label'])
+                    
+                    # Create cross-tabulation
+                    crosstab = pd.crosstab(col_clean, response_clean)
+                    
+                    # Limit categories for readability
+                    if len(crosstab) > 10:
+                        crosstab = crosstab.head(10)
+                    
+                    crosstab.plot(kind='bar', ax=ax, stacked=True)
+                    ax.set_title(f'Response by {col}')
+                    ax.set_xlabel(col)
+                    ax.set_ylabel('Count')
+                    ax.tick_params(axis='x', rotation=45)
+                    ax.legend(title='Response', bbox_to_anchor=(1.05, 1), loc='upper left')
+            
+            plt.tight_layout()
+            self.save_chart("response_enhanced", "Enhanced Response Analysis with NaN Handling")
+            plt.show()
+            
+            # Log NaN impact
+            cleaning_info = chart_data['cleaning_info']
+            self.log_text(f"\n📊 NaN Impact on Response Analysis:")
+            self.log_text(f"   Original responses: {cleaning_info['original_length']}")
+            self.log_text(f"   Missing responses: {cleaning_info['nan_count']} ({cleaning_info['nan_percentage']:.1f}%)")
+            self.log_text(f"   Cleaning method: {cleaning_info['cleaning_method']}")
     
-    def run_full_analysis(self):
-        """
-        Run the complete EDA pipeline
-        """
+    def save_text_output(self):
+        """Save all text output to file"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        header = f"""
+{'='*80}
+ENHANCED CSV EXPLORATORY DATA ANALYSIS REPORT
+(With Advanced NaN Handling for Visualizations)
+Generated on: {timestamp}
+Dataset: {self.file_path}
+{'='*80}
+
+NaN HANDLING CONFIGURATION:
+- Categorical NaN Label: '{self.nan_handling_config['categorical_nan_label']}'
+- Show NaN in Charts: {self.nan_handling_config['show_nan_in_charts']}
+- NaN Color: {self.nan_handling_config['nan_color']}
+- Min Category Threshold: {self.nan_handling_config['min_category_threshold']*100}%
+- Max Categories Display: {self.nan_handling_config['max_categories_display']}
+
+"""
+        
+        with open(self.text_file_path, 'w', encoding='utf-8') as f:
+            f.write(header)
+            f.write('\n'.join(self.text_output))
+        
+        print(f"\n💾 Enhanced text analysis saved to: {self.text_file_path}")
+    
+    def run_enhanced_analysis(self):
+        """Run the enhanced EDA pipeline with comprehensive NaN handling"""
         if self.df is None:
             self.log_text("❌ No data loaded. Please check file path.")
             return
         
-        self.log_text("🚀 Starting Comprehensive EDA Analysis...")
+        self.log_text("🚀 Starting Enhanced EDA Analysis with NaN Handling...")
         
-        self.basic_info()
+        # Run all analysis steps
         self.data_quality_assessment()
         self.categorical_analysis()
+        self.numerical_analysis()
         self.response_analysis()
-        self.author_analysis()
-        self.site_facility_analysis()
-        self.template_analysis()
-        self.comment_analysis()
-        self.correlation_analysis()
-        self.generate_summary_report()
         
-        # Save all text output to file
+        # Save all outputs
         self.save_text_output()
         
-        self.log_text(f"\n✅ Analysis Complete!")
+        self.log_text(f"\n✅ Enhanced Analysis Complete!")
         self.log_text(f"📁 Dataset: {self.file_path}")
         self.log_text(f"📊 Records Analyzed: {len(self.df):,}")
-        self.log_text(f"📁 Charts saved to: {self.analysis_folder}/")
-        self.log_text(f"📄 Text report saved to: {self.text_file_path}")
-        
-        # Create summary file with file locations
-        self.create_file_summary()
+        self.log_text(f"📈 Charts Generated: {self.chart_counter - 1}")
+        self.log_text(f"📄 Report saved to: {self.text_file_path}")
+        self.log_text(f"🎯 All outputs saved to: {self.analysis_folder}/")
 
+# Additional utility functions for specific NaN handling scenarios
+
+def create_nan_summary_report(df, output_file="nan_summary_report.txt"):
+    """
+    Create a comprehensive NaN summary report
     
-    def create_file_summary(self):
-        """
-        Create a summary file listing all generated files
-        """
-        summary_path = os.path.join(self.analysis_folder, "file_summary.txt")
+    Args:
+        df: pandas DataFrame
+        output_file: Output file path for the report
+    """
+    
+    with open(output_file, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("COMPREHENSIVE NaN ANALYSIS REPORT\n")
+        f.write("="*80 + "\n\n")
         
-        # Get list of all files in analysis folder
-        analysis_files = os.listdir(self.analysis_folder)
-        chart_files = [f for f in analysis_files if f.endswith('.png')]
+        # Overall statistics
+        total_cells = df.shape[0] * df.shape[1]
+        total_nan = df.isnull().sum().sum()
+        nan_percentage = (total_nan / total_cells) * 100
         
-        summary_content = f"""
-EDA ANALYSIS FILES SUMMARY
-Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-Dataset: {self.file_path}
+        f.write(f"OVERALL STATISTICS:\n")
+        f.write(f"Total cells: {total_cells:,}\n")
+        f.write(f"Total NaN values: {total_nan:,}\n")
+        f.write(f"NaN percentage: {nan_percentage:.2f}%\n\n")
+        
+        # Per-column analysis
+        f.write("PER-COLUMN NaN ANALYSIS:\n")
+        f.write("-" * 50 + "\n")
+        
+        for col in df.columns:
+            col_nan = df[col].isnull().sum()
+            col_total = len(df[col])
+            col_nan_pct = (col_nan / col_total) * 100
+            
+            f.write(f"\n{col}:\n")
+            f.write(f"  Data type: {df[col].dtype}\n")
+            f.write(f"  Total values: {col_total:,}\n")
+            f.write(f"  NaN values: {col_nan:,}\n")
+            f.write(f"  NaN percentage: {col_nan_pct:.2f}%\n")
+            
+            if col_nan > 0:
+                # NaN patterns
+                nan_indices = df[df[col].isnull()].index.tolist()
+                f.write(f"  First few NaN indices: {nan_indices[:10]}\n")
+                
+                # Check for patterns
+                if len(nan_indices) > 1:
+                    consecutive_groups = []
+                    current_group = [nan_indices[0]]
+                    
+                    for i in range(1, len(nan_indices)):
+                        if nan_indices[i] == nan_indices[i-1] + 1:
+                            current_group.append(nan_indices[i])
+                        else:
+                            if len(current_group) > 1:
+                                consecutive_groups.append(current_group)
+                            current_group = [nan_indices[i]]
+                    
+                    if len(current_group) > 1:
+                        consecutive_groups.append(current_group)
+                    
+                    if consecutive_groups:
+                        f.write(f"  Consecutive NaN groups found: {len(consecutive_groups)}\n")
+                        for j, group in enumerate(consecutive_groups[:3]):
+                            f.write(f"    Group {j+1}: indices {group[0]}-{group[-1]} (length: {len(group)})\n")
+        
+        # Correlation between missing values
+        f.write("\n" + "="*50 + "\n")
+        f.write("MISSING VALUE CORRELATIONS:\n")
+        f.write("="*50 + "\n")
+        
+        # Create missing value correlation matrix
+        missing_df = df.isnull().astype(int)
+        missing_corr = missing_df.corr()
+        
+        # Find highly correlated missing patterns
+        high_corr_pairs = []
+        for i in range(len(missing_corr.columns)):
+            for j in range(i+1, len(missing_corr.columns)):
+                corr_val = missing_corr.iloc[i, j]
+                if abs(corr_val) > 0.5:  # High correlation threshold
+                    high_corr_pairs.append((missing_corr.columns[i], missing_corr.columns[j], corr_val))
+        
+        if high_corr_pairs:
+            f.write("Highly correlated missing patterns (|correlation| > 0.5):\n")
+            for col1, col2, corr in high_corr_pairs:
+                f.write(f"  {col1} <-> {col2}: {corr:.3f}\n")
+        else:
+            f.write("No highly correlated missing patterns found.\n")
+        
+        # Recommendations
+        f.write("\n" + "="*50 + "\n")
+        f.write("RECOMMENDATIONS:\n")
+        f.write("="*50 + "\n")
+        
+        # Column-specific recommendations
+        for col in df.columns:
+            col_nan_pct = (df[col].isnull().sum() / len(df)) * 100
+            
+            if col_nan_pct > 70:
+                f.write(f"\n{col}: DROP COLUMN (>70% missing)\n")
+                f.write(f"  - Consider removing this column from analysis\n")
+                f.write(f"  - Investigate data collection process\n")
+                
+            elif col_nan_pct > 30:
+                f.write(f"\n{col}: SPECIAL HANDLING REQUIRED (>30% missing)\n")
+                f.write(f"  - Consider advanced imputation techniques\n")
+                f.write(f"  - Create missing value indicator variable\n")
+                f.write(f"  - Investigate systematic missing patterns\n")
+                
+            elif col_nan_pct > 5:
+                f.write(f"\n{col}: MODERATE MISSING DATA (>5% missing)\n")
+                if df[col].dtype in ['int64', 'float64']:
+                    f.write(f"  - Consider median/mean imputation\n")
+                    f.write(f"  - Try regression imputation\n")
+                else:
+                    f.write(f"  - Consider mode imputation\n")
+                    f.write(f"  - Create 'Unknown' category\n")
+                    
+            elif col_nan_pct > 0:
+                f.write(f"\n{col}: LOW MISSING DATA (<5% missing)\n")
+                f.write(f"  - Simple imputation or listwise deletion acceptable\n")
+    
+    print(f"📄 Comprehensive NaN report saved to: {output_file}")
 
-📊 CHARTS GENERATED ({len(chart_files)} files):
-{'='*50}
-"""
-        
-        for i, chart_file in enumerate(sorted(chart_files), 1):
-            summary_content += f"{i:2}. {chart_file}\n"
-        
-        summary_content += f"""
-📄 TEXT REPORTS:
-{'='*50}
-1. analysis_report.txt - Complete text analysis
-2. file_summary.txt - This file summary
+def handle_categorical_nan_for_modeling(df, columns, strategy='mode'):
+    """
+    Handle NaN values in categorical columns for modeling
+    
+    Args:
+        df: pandas DataFrame
+        columns: list of categorical column names
+        strategy: 'mode', 'unknown', or 'frequent'
+    
+    Returns:
+        DataFrame with handled NaN values
+    """
+    
+    df_clean = df.copy()
+    
+    for col in columns:
+        if col in df_clean.columns:
+            if strategy == 'mode':
+                # Fill with most frequent value
+                mode_value = df_clean[col].mode()
+                if len(mode_value) > 0:
+                    df_clean[col] = df_clean[col].fillna(mode_value[0])
+                else:
+                    df_clean[col] = df_clean[col].fillna('Unknown')
+                    
+            elif strategy == 'unknown':
+                # Fill with 'Unknown' category
+                df_clean[col] = df_clean[col].fillna('Unknown')
+                
+            elif strategy == 'frequent':
+                # Fill with most frequent non-null value
+                value_counts = df_clean[col].value_counts()
+                if len(value_counts) > 0:
+                    df_clean[col] = df_clean[col].fillna(value_counts.index[0])
+                else:
+                    df_clean[col] = df_clean[col].fillna('Unknown')
+    
+    return df_clean
 
-📁 FOLDER STRUCTURE:
-{'='*50}
-analysis/
-├── analysis_report.txt     (Complete text analysis)
-├── file_summary.txt        (This summary)
-"""
-        
-        for chart_file in sorted(chart_files):
-            summary_content += f"├── {chart_file}\n"
-        
-        summary_content += f"""
-🔧 USAGE:
-{'='*50}
-- Open analysis_report.txt for complete text analysis
-- View PNG files for charts and visualizations
-- All files are saved in high resolution (300 DPI)
-- Charts are optimized for presentations and reports
+def handle_numerical_nan_for_modeling(df, columns, strategy='median'):
+    """
+    Handle NaN values in numerical columns for modeling
+    
+    Args:
+        df: pandas DataFrame
+        columns: list of numerical column names
+        strategy: 'median', 'mean', 'mode', or 'interpolate'
+    
+    Returns:
+        DataFrame with handled NaN values
+    """
+    
+    df_clean = df.copy()
+    
+    for col in columns:
+        if col in df_clean.columns:
+            if strategy == 'median':
+                df_clean[col] = df_clean[col].fillna(df_clean[col].median())
+                
+            elif strategy == 'mean':
+                df_clean[col] = df_clean[col].fillna(df_clean[col].mean())
+                
+            elif strategy == 'mode':
+                mode_value = df_clean[col].mode()
+                if len(mode_value) > 0:
+                    df_clean[col] = df_clean[col].fillna(mode_value[0])
+                else:
+                    df_clean[col] = df_clean[col].fillna(0)
+                    
+            elif strategy == 'interpolate':
+                df_clean[col] = df_clean[col].interpolate()
+                # Fill any remaining NaN with median
+                df_clean[col] = df_clean[col].fillna(df_clean[col].median())
+    
+    return df_clean
 
-📊 ANALYSIS SECTIONS:
-{'='*50}
-1. Basic Dataset Information
-2. Data Quality Assessment
-3. Categorical Data Analysis
-4. Response Pattern Analysis
-5. Author Productivity Analysis
-6. Site & Facility Analysis
-7. Template Usage Analysis
-8. Comment Analysis
-9. Correlation Analysis
-10. Executive Summary Report
-"""
+def create_missing_value_indicators(df, columns, threshold=0.05):
+    """
+    Create indicator variables for missing values
+    
+    Args:
+        df: pandas DataFrame
+        columns: list of column names to create indicators for
+        threshold: minimum missing percentage to create indicator
+    
+    Returns:
+        DataFrame with missing value indicators
+    """
+    
+    df_with_indicators = df.copy()
+    
+    for col in columns:
+        if col in df.columns:
+            missing_pct = df[col].isnull().sum() / len(df)
+            
+            if missing_pct >= threshold:
+                indicator_col = f"{col}_missing"
+                df_with_indicators[indicator_col] = df[col].isnull().astype(int)
+                print(f"Created missing indicator for {col} (missing: {missing_pct:.1%})")
+    
+    return df_with_indicators
+
+# Example usage functions
+
+def run_enhanced_eda_with_nan_handling(file_path):
+    """
+    Run enhanced EDA with comprehensive NaN handling
+    
+    Args:
+        file_path: path to CSV file
+    """
+    
+    print("🚀 Starting Enhanced EDA with NaN Handling...")
+    print("="*60)
+    
+    # Initialize analyzer
+    analyzer = CSVExploratoryAnalysis(file_path)
+    
+    # Run enhanced analysis
+    analyzer.run_enhanced_analysis()
+    
+    # Create additional NaN summary report
+    print("\n📋 Creating comprehensive NaN summary report...")
+    create_nan_summary_report(analyzer.df, 
+                             os.path.join(analyzer.analysis_folder, "nan_summary_report.txt"))
+    
+    print(f"\n✅ Enhanced EDA with NaN handling complete!")
+    print(f"📁 All outputs saved to: {analyzer.analysis_folder}/")
+    
+    return analyzer
+
+def prepare_data_for_modeling(df, target_column=None):
+    """
+    Prepare data for modeling with intelligent NaN handling
+    
+    Args:
+        df: pandas DataFrame
+        target_column: name of target column (if any)
+    
+    Returns:
+        dict with cleaned data and metadata
+    """
+    
+    print("🔧 Preparing data for modeling...")
+    
+    # Separate features and target
+    if target_column and target_column in df.columns:
+        features = df.drop(columns=[target_column])
+        target = df[target_column]
+    else:
+        features = df.copy()
+        target = None
+    
+    # Identify column types
+    categorical_cols = features.select_dtypes(include=['object']).columns.tolist()
+    numerical_cols = features.select_dtypes(include=[np.number]).columns.tolist()
+    
+    print(f"📊 Data overview:")
+    print(f"   Total features: {len(features.columns)}")
+    print(f"   Categorical: {len(categorical_cols)}")
+    print(f"   Numerical: {len(numerical_cols)}")
+    
+    # Handle categorical NaN
+    if categorical_cols:
+        print(f"\n🏷️ Handling categorical NaN values...")
+        features_clean = handle_categorical_nan_for_modeling(features, categorical_cols, strategy='unknown')
         
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            f.write(summary_content)
+        for col in categorical_cols:
+            original_nan = features[col].isnull().sum()
+            if original_nan > 0:
+                print(f"   {col}: {original_nan} NaN values → filled with 'Unknown'")
+    else:
+        features_clean = features.copy()
+    
+    # Handle numerical NaN
+    if numerical_cols:
+        print(f"\n📈 Handling numerical NaN values...")
+        features_clean = handle_numerical_nan_for_modeling(features_clean, numerical_cols, strategy='median')
         
-        print(f"📋 File summary saved to: {summary_path}")
+        for col in numerical_cols:
+            original_nan = features[col].isnull().sum()
+            if original_nan > 0:
+                print(f"   {col}: {original_nan} NaN values → filled with median")
+    
+    # Create missing value indicators
+    print(f"\n🔍 Creating missing value indicators...")
+    features_with_indicators = create_missing_value_indicators(features_clean, 
+                                                             features.columns.tolist(), 
+                                                             threshold=0.05)
+    
+    # Final validation
+    remaining_nan = features_with_indicators.isnull().sum().sum()
+    print(f"\n✅ Data preparation complete!")
+    print(f"   Remaining NaN values: {remaining_nan}")
+    print(f"   Final feature count: {len(features_with_indicators.columns)}")
+    
+    return {
+        'features': features_with_indicators,
+        'target': target,
+        'categorical_columns': categorical_cols,
+        'numerical_columns': numerical_cols,
+        'original_nan_count': df.isnull().sum().sum(),
+        'final_nan_count': remaining_nan
+    }
 
 # Example usage
 if __name__ == "__main__":
-    # Replace 'your_file.csv' with your actual file path
+    # Example 1: Run enhanced EDA with NaN handling
+    print("="*80)
+    print("ENHANCED CSV EDA WITH NaN HANDLING - EXAMPLE USAGE")
+    print("="*80)
+    
+    # Replace with your CSV file path
     file_path = "your_data.csv"
     
-    # Create analyzer instance
-    analyzer = CSVExploratoryAnalysis(file_path)
+    try:
+        # Run enhanced analysis
+        analyzer = run_enhanced_eda_with_nan_handling(file_path)
+        
+        # Example 2: Prepare data for modeling
+        print("\n" + "="*60)
+        print("PREPARING DATA FOR MODELING")
+        print("="*60)
+        
+        modeling_data = prepare_data_for_modeling(analyzer.df, target_column='RESPONSE')
+        
+        print(f"\n🎯 Data ready for modeling:")
+        print(f"   Features shape: {modeling_data['features'].shape}")
+        if modeling_data['target'] is not None:
+            print(f"   Target shape: {modeling_data['target'].shape}")
+        
+    except FileNotFoundError:
+        print(f"❌ File not found: {file_path}")
+        print("Please update the file_path variable with your actual CSV file path")
+    except Exception as e:
+        print(f"❌ Error: {e}")
     
-    # Run full analysis
-    analyzer.run_full_analysis()
-    
-    # Or run individual analyses
-    # analyzer.basic_info()
-    # analyzer.data_quality_assessment()
-    # analyzer.response_analysis()
-    
-    print("\n" + "="*60)
-    print("🎯 USAGE INSTRUCTIONS")
-    print("="*60)
-    print("1. Save this code as 'csv_eda.py'")
-    print("2. Install required packages: pip install pandas numpy matplotlib seaborn scipy")
-    print("3. Update file_path variable with your CSV file path")
-    print("4. Run: python csv_eda.py")
-    print("5. For Jupyter: Create analyzer = CSVExploratoryAnalysis('file.csv')")
-    print("6. Then run: analyzer.run_full_analysis()")
-    print("")
-    print("📁 OUTPUT FILES:")
-    print("• analysis/analysis_report.txt - Complete text analysis")
-    print("• analysis/*.png - All charts and visualizations")
-    print("• analysis/file_summary.txt - Summary of all generated files")
-    print("")
-    print("✨ All outputs are automatically saved to 'analysis' folder!")
+    print("\n" + "="*80)
+    print("KEY FEATURES OF ENHANCED NaN HANDLING:")
+    print("="*80)
+    print("✅ Intelligent NaN detection and labeling in charts")
+    print("✅ Custom colors for missing value categories")
+    print("✅ Comprehensive missing value impact analysis")
+    print("✅ Smart data cleaning for different data types")
+    print("✅ Missing value correlation analysis")
+    print("✅ Automated recommendations for NaN handling")
+    print("✅ Model-ready data preparation")
+    print("✅ Detailed reporting and visualization")
+    print("✅ Configurable NaN handling strategies")
+    print("✅ Professional charts without 'nan' labels")
+    print("\n🚀 Ready to use with your data!")
