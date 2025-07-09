@@ -1,542 +1,102 @@
-import pandas as pd
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import IntegrityError
-from datetime import datetime
-
-def insert_employee_compliance_status_from_csv(csv_file_path, database_url):
-    """
-    Read CSV file and insert employee compliance status data into database
+def create_data_quality_dashboard(df):
+    """Create interactive data quality dashboard"""
     
-    Args:
-        csv_file_path (str): Path to the CSV file
-        database_url (str): SQLAlchemy database URL (e.g., 'sqlite:///example.db')
-    """
+    # Missing values analysis
+    missing_data = pd.DataFrame({
+        'Column': df.columns,
+        'Missing_Count': df.isnull().sum(),
+        'Missing_Percentage': (df.isnull().sum() / len(df)) * 100,
+        'Data_Type': df.dtypes
+    }).sort_values('Missing_Percentage', ascending=False)
     
-    # Create database engine and session
-    engine = create_engine(database_url)
-    Session = sessionmaker(bind=engine)
-    session = Session()
+    # Create subplots with proper specs
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=('Missing Values by Column', 'Data Type Distribution', 
+                       'Missing Values Heatmap', 'Data Completeness'),
+        specs=[[{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}]]
+    )
     
-    try:
-        # Read CSV file
-        df = pd.read_csv(csv_file_path)
-        
-        # Clean column names (remove extra spaces)
-        df.columns = df.columns.str.strip()
-        
-        # Display CSV info
-        print(f"CSV file loaded with {len(df)} rows")
-        print(f"Columns: {list(df.columns)}")
-        
-        # Get existing employees and compliance requirements for validation
-        employee_stmt = select(Employee)
-        employees_result = session.execute(employee_stmt).scalars().all()
-        existing_employees = {emp.id: emp for emp in employees_result}
-        
-        compliance_req_stmt = select(ComplianceRequirement)
-        compliance_reqs_result = session.execute(compliance_req_stmt).scalars().all()
-        existing_compliance_reqs = {req.id: req for req in compliance_reqs_result}
-        
-        print(f"Found {len(existing_employees)} employees and {len(existing_compliance_reqs)} compliance requirements in database")
-        
-        # Validate data and check for missing required fields
-        validation_errors = []
-        
-        for index, row in df.iterrows():
-            # Extract and clean data from CSV row
-            employee_name = row['EMPLOYEE_NAME'].strip() if pd.notna(row['EMPLOYEE_NAME']) else None
-            wop_id = str(row['WOP_ID']).strip() if pd.notna(row['WOP_ID']) else None
-            compliance_req_id = int(row['COMPLIANCE_REQUIREMENT_ID']) if pd.notna(row['COMPLIANCE_REQUIREMENT_ID']) else None
-            compliance_req_name = row['COMPLIANCE_REQUIREMENT_NAME'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_NAME']) else None
-            compliance_status = row['COMPLIANCE_REQUIREMENT_STATUS'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_STATUS']) else None
-            assigned_on = row['COMPLIANCE_REQUIREMENT_ASSIGNED_ON'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_ASSIGNED_ON']) else None
-            acquired_on = row['COMPLIANCE_REQUIREMENT_ACQUIRED_ON'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_ACQUIRED_ON']) else None
-            expires_on = row['COMPLIANCE_REQUIREMENT_EXPIRES_ON'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_EXPIRES_ON']) else None
-            
-            # Check for missing required fields
-            missing_fields = []
-            if not employee_name:
-                missing_fields.append("EMPLOYEE_NAME")
-            if not wop_id:
-                missing_fields.append("WOP_ID")
-            if not compliance_req_id:
-                missing_fields.append("COMPLIANCE_REQUIREMENT_ID")
-            if not compliance_status:
-                missing_fields.append("COMPLIANCE_REQUIREMENT_STATUS")
-            
-            if missing_fields:
-                validation_errors.append(f"Row {index + 1}: Missing required fields: {', '.join(missing_fields)}")
-                continue
-            
-            # Find employee by WOP_ID (assuming Employee model has wop_id field)
-            # If Employee model uses a different field, adjust accordingly
-            employee_stmt = select(Employee).where(Employee.wop_id == wop_id)
-            employee = session.execute(employee_stmt).scalar_one_or_none()
-            
-            if not employee:
-                validation_errors.append(f"Row {index + 1}: Employee with WOP_ID '{wop_id}' not found in database")
-                continue
-            
-            # Check if compliance requirement exists
-            if compliance_req_id not in existing_compliance_reqs:
-                validation_errors.append(f"Row {index + 1}: ComplianceRequirement with ID '{compliance_req_id}' not found in database")
-                continue
-        
-        # Raise ValueError if any validation errors found
-        if validation_errors:
-            error_message = "Validation failed:\n" + "\n".join(validation_errors)
-            raise ValueError(error_message)
-        
-        # Process each row for insertion/update
-        processed_count = 0
-        updated_count = 0
-        inserted_count = 0
-        
-        for index, row in df.iterrows():
-            try:
-                # Extract data (we know it's valid from validation above)
-                employee_name = row['EMPLOYEE_NAME'].strip()
-                wop_id = str(row['WOP_ID']).strip()
-                compliance_req_id = int(row['COMPLIANCE_REQUIREMENT_ID'])
-                compliance_status = row['COMPLIANCE_REQUIREMENT_STATUS'].strip()
-                assigned_on = row['COMPLIANCE_REQUIREMENT_ASSIGNED_ON'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_ASSIGNED_ON']) else None
-                acquired_on = row['COMPLIANCE_REQUIREMENT_ACQUIRED_ON'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_ACQUIRED_ON']) else None
-                expires_on = row['COMPLIANCE_REQUIREMENT_EXPIRES_ON'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_EXPIRES_ON']) else None
-                
-                # Get employee
-                employee_stmt = select(Employee).where(Employee.wop_id == wop_id)
-                employee = session.execute(employee_stmt).scalar_one()
-                
-                # Parse dates if they exist
-                assigned_date = None
-                acquired_date = None
-                expires_date = None
-                
-                if assigned_on:
-                    try:
-                        assigned_date = datetime.strptime(assigned_on, '%m/%d/%Y').date()
-                    except ValueError:
-                        print(f"Row {index + 1}: Invalid assigned_on date format: {assigned_on}")
-                
-                if acquired_on:
-                    try:
-                        acquired_date = datetime.strptime(acquired_on, '%m/%d/%Y').date()
-                    except ValueError:
-                        print(f"Row {index + 1}: Invalid acquired_on date format: {acquired_on}")
-                
-                if expires_on:
-                    try:
-                        expires_date = datetime.strptime(expires_on, '%m/%d/%Y').date()
-                    except ValueError:
-                        print(f"Row {index + 1}: Invalid expires_on date format: {expires_on}")
-                
-                # Check if EmployeeComplianceStatus already exists
-                status_stmt = select(EmployeeComplianceStatus).where(
-                    (EmployeeComplianceStatus.employee_id == employee.id) &
-                    (EmployeeComplianceStatus.compliance_requirement_id == compliance_req_id)
-                )
-                existing_status = session.execute(status_stmt).scalar_one_or_none()
-                
-                if existing_status:
-                    # Update existing record
-                    existing_status.status = compliance_status
-                    if assigned_date:
-                        existing_status.assigned_on = assigned_date
-                    if acquired_date:
-                        existing_status.acquired_on = acquired_date
-                    if expires_date:
-                        existing_status.expires_on = expires_date
-                    
-                    updated_count += 1
-                    print(f"Updated compliance status for employee {employee_name} (WOP: {wop_id}), requirement {compliance_req_id}")
-                else:
-                    # Create new record
-                    new_status = EmployeeComplianceStatus(
-                        employee_id=employee.id,
-                        compliance_requirement_id=compliance_req_id,
-                        status=compliance_status,
-                        assigned_on=assigned_date,
-                        acquired_on=acquired_date,
-                        expires_on=expires_date
-                    )
-                    session.add(new_status)
-                    inserted_count += 1
-                    print(f"Created new compliance status for employee {employee_name} (WOP: {wop_id}), requirement {compliance_req_id}")
-                
-                processed_count += 1
-                
-            except Exception as e:
-                print(f"Error processing row {index + 1}: {str(e)}")
-                raise
-        
-        # Commit all changes
-        session.commit()
-        print(f"Successfully processed {processed_count} records: {inserted_count} inserted, {updated_count} updated")
-        
-    except Exception as e:
-        session.rollback()
-        print(f"Error processing CSV file: {str(e)}")
-        raise
+    # Missing values bar chart
+    fig.add_trace(
+        go.Bar(x=missing_data['Column'], y=missing_data['Missing_Percentage'],
+               name='Missing %', marker_color='red', opacity=0.7),
+        row=1, col=1
+    )
     
-    finally:
-        session.close()
-
-def insert_employee_compliance_status_bulk(csv_file_path, database_url):
-    """
-    Alternative method using bulk operations for better performance with large datasets
-    """
-    engine = create_engine(database_url)
-    Session = sessionmaker(bind=engine)
-    session = Session()
+    # Data type distribution - Changed to bar chart to avoid pie chart compatibility issues
+    dtype_counts = df.dtypes.value_counts()
+    fig.add_trace(
+        go.Bar(x=dtype_counts.index.astype(str), y=dtype_counts.values,
+               name='Data Types', marker_color='lightblue', opacity=0.7),
+        row=1, col=2
+    )
     
-    try:
-        # Read CSV
-        df = pd.read_csv(csv_file_path)
-        df.columns = df.columns.str.strip()
-        
-        print(f"Processing {len(df)} rows for bulk operations")
-        
-        # Get existing employees and compliance requirements
-        employee_stmt = select(Employee)
-        employees_result = session.execute(employee_stmt).scalars().all()
-        employee_mappings = {emp.wop_id: emp.id for emp in employees_result}
-        
-        compliance_req_stmt = select(ComplianceRequirement)
-        compliance_reqs_result = session.execute(compliance_req_stmt).scalars().all()
-        existing_compliance_req_ids = {req.id for req in compliance_reqs_result}
-        
-        # Validate all data first
-        validation_errors = []
-        valid_data = []
-        
-        for index, row in df.iterrows():
-            employee_name = row['EMPLOYEE_NAME'].strip() if pd.notna(row['EMPLOYEE_NAME']) else None
-            wop_id = str(row['WOP_ID']).strip() if pd.notna(row['WOP_ID']) else None
-            compliance_req_id = int(row['COMPLIANCE_REQUIREMENT_ID']) if pd.notna(row['COMPLIANCE_REQUIREMENT_ID']) else None
-            compliance_status = row['COMPLIANCE_REQUIREMENT_STATUS'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_STATUS']) else None
-            
-            # Validate required fields
-            if not all([employee_name, wop_id, compliance_req_id, compliance_status]):
-                missing = [field for field, value in [
-                    ("EMPLOYEE_NAME", employee_name),
-                    ("WOP_ID", wop_id),
-                    ("COMPLIANCE_REQUIREMENT_ID", compliance_req_id),
-                    ("COMPLIANCE_REQUIREMENT_STATUS", compliance_status)
-                ] if not value]
-                validation_errors.append(f"Row {index + 1}: Missing required fields: {', '.join(missing)}")
-                continue
-            
-            # Validate employee exists
-            if wop_id not in employee_mappings:
-                validation_errors.append(f"Row {index + 1}: Employee with WOP_ID '{wop_id}' not found")
-                continue
-            
-            # Validate compliance requirement exists
-            if compliance_req_id not in existing_compliance_req_ids:
-                validation_errors.append(f"Row {index + 1}: ComplianceRequirement ID '{compliance_req_id}' not found")
-                continue
-            
-            valid_data.append({
-                'row_index': index + 1,
-                'employee_id': employee_mappings[wop_id],
-                'compliance_requirement_id': compliance_req_id,
-                'status': compliance_status,
-                'assigned_on': row['COMPLIANCE_REQUIREMENT_ASSIGNED_ON'] if pd.notna(row['COMPLIANCE_REQUIREMENT_ASSIGNED_ON']) else None,
-                'acquired_on': row['COMPLIANCE_REQUIREMENT_ACQUIRED_ON'] if pd.notna(row['COMPLIANCE_REQUIREMENT_ACQUIRED_ON']) else None,
-                'expires_on': row['COMPLIANCE_REQUIREMENT_EXPIRES_ON'] if pd.notna(row['COMPLIANCE_REQUIREMENT_EXPIRES_ON']) else None
-            })
-        
-        # Raise ValueError if validation failed
-        if validation_errors:
-            error_message = "Validation failed:\n" + "\n".join(validation_errors)
-            raise ValueError(error_message)
-        
-        # Parse dates and prepare for bulk operations
-        records_to_insert = []
-        records_to_update = []
-        
-        # Get existing employee compliance statuses
-        existing_statuses_stmt = select(EmployeeComplianceStatus)
-        existing_statuses = session.execute(existing_statuses_stmt).scalars().all()
-        existing_status_keys = {(status.employee_id, status.compliance_requirement_id): status.id 
-                              for status in existing_statuses}
-        
-        for data in valid_data:
-            # Parse dates
-            assigned_date = None
-            acquired_date = None
-            expires_date = None
-            
-            if data['assigned_on']:
-                try:
-                    assigned_date = datetime.strptime(data['assigned_on'], '%m/%d/%Y').date()
-                except ValueError:
-                    print(f"Row {data['row_index']}: Invalid assigned_on date format")
-            
-            if data['acquired_on']:
-                try:
-                    acquired_date = datetime.strptime(data['acquired_on'], '%m/%d/%Y').date()
-                except ValueError:
-                    print(f"Row {data['row_index']}: Invalid acquired_on date format")
-            
-            if data['expires_on']:
-                try:
-                    expires_date = datetime.strptime(data['expires_on'], '%m/%d/%Y').date()
-                except ValueError:
-                    print(f"Row {data['row_index']}: Invalid expires_on date format")
-            
-            key = (data['employee_id'], data['compliance_requirement_id'])
-            
-            if key in existing_status_keys:
-                # Update existing record
-                records_to_update.append({
-                    'id': existing_status_keys[key],
-                    'employee_id': data['employee_id'],
-                    'compliance_requirement_id': data['compliance_requirement_id'],
-                    'status': data['status'],
-                    'assigned_on': assigned_date,
-                    'acquired_on': acquired_date,
-                    'expires_on': expires_date
-                })
-            else:
-                # Insert new record
-                records_to_insert.append({
-                    'employee_id': data['employee_id'],
-                    'compliance_requirement_id': data['compliance_requirement_id'],
-                    'status': data['status'],
-                    'assigned_on': assigned_date,
-                    'acquired_on': acquired_date,
-                    'expires_on': expires_date
-                })
-        
-        # Perform bulk operations
-        if records_to_insert:
-            session.bulk_insert_mappings(EmployeeComplianceStatus, records_to_insert)
-            print(f"Bulk inserted {len(records_to_insert)} employee compliance status records")
-        
-        if records_to_update:
-            session.bulk_update_mappings(EmployeeComplianceStatus, records_to_update)
-            print(f"Bulk updated {len(records_to_update)} employee compliance status records")
-        
-        session.commit()
-        print("Bulk operations completed successfully")
-        
-    except Exception as e:
-        session.rollback()
-        print(f"Error in bulk operations: {str(e)}")
-        raise
+    # Missing values heatmap (sample)
+    sample_df = df.head(100)  # Sample for visualization
+    missing_matrix = sample_df.isnull().astype(int)
     
-    finally:
-        session.close()
-
-# Example usage
-if __name__ == "__main__":
-    # Configuration
-    CSV_FILE_PATH = "employee_compliance_status.csv"  # Update with your CSV file path
-    DATABASE_URL = "sqlite:///compliance.db"  # Update with your database URL
+    fig.add_trace(
+        go.Heatmap(z=missing_matrix.values.T, 
+                   y=missing_matrix.columns,
+                   colorscale='Reds',
+                   showscale=False,
+                   name='Missing Pattern'),
+        row=2, col=1
+    )
     
-    # Choose method based on your needs:
-    # Method 1: Row-by-row processing (better for complex logic and error handling)
-    insert_employee_compliance_status_from_csv(CSV_FILE_PATH, DATABASE_URL)
+    # Completeness score
+    completeness = (1 - df.isnull().sum() / len(df)) * 100
+    fig.add_trace(
+        go.Bar(x=completeness.index, y=completeness.values,
+               name='Completeness %', marker_color='green', opacity=0.7),
+        row=2, col=2
+    )
     
-    # Method 2: Bulk operations (better for large datasets)
-    # insert_employee_compliance_status_bulk(CSV_FILE_PATH, DATABASE_URL)
-
-def insert_compliance_data_from_csv(csv_file_path, database_url):
-    """
-    Read CSV file and insert compliance role and requirement data into database
+    # Update layout and axis labels
+    fig.update_xaxes(title_text="Columns", row=1, col=1)
+    fig.update_yaxes(title_text="Missing %", row=1, col=1)
+    fig.update_xaxes(title_text="Data Types", row=1, col=2)
+    fig.update_yaxes(title_text="Count", row=1, col=2)
+    fig.update_xaxes(title_text="Row Index", row=2, col=1)
+    fig.update_yaxes(title_text="Columns", row=2, col=1)
+    fig.update_xaxes(title_text="Columns", row=2, col=2)
+    fig.update_yaxes(title_text="Completeness %", row=2, col=2)
     
-    Args:
-        csv_file_path (str): Path to the CSV file
-        database_url (str): SQLAlchemy database URL (e.g., 'sqlite:///example.db')
-    """
+    # Rotate x-axis labels for better readability
+    fig.update_xaxes(tickangle=45, row=1, col=1)
+    fig.update_xaxes(tickangle=45, row=1, col=2)
+    fig.update_xaxes(tickangle=45, row=2, col=2)
     
-    # Create database engine and session
-    engine = create_engine(database_url)
-    Session = sessionmaker(bind=engine)
-    session = Session()
+    fig.update_layout(height=800, showlegend=False, title_text="Data Quality Dashboard")
+    fig.show()
     
-    try:
-        # Read CSV file
-        df = pd.read_csv(csv_file_path)
-        
-        # Clean column names (remove extra spaces)
-        df.columns = df.columns.str.strip()
-        
-        # Display CSV info
-        logger.info(f"CSV file loaded with {len(df)} rows")
-        logger.info(f"Columns: {list(df.columns)}")
-        
-        # Process each row
-        for index, row in df.iterrows():
-            try:
-                # Extract data from CSV row
-                role_name = row['ROLE_NAME'].strip() if pd.notna(row['ROLE_NAME']) else None
-                compliance_req_id = str(row['COMPLIANCE_REQUIREMENT_ID']).strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_ID']) else None
-                compliance_req_name = row['COMPLIANCE_REQUIREMENT_NAME'].strip() if pd.notna(row['COMPLIANCE_REQUIREMENT_NAME']) else None
-                
-                # Check for missing essential data and raise ValueError
-                missing_fields = []
-                if not role_name:
-                    missing_fields.append("ROLE_NAME")
-                if not compliance_req_name:
-                    missing_fields.append("COMPLIANCE_REQUIREMENT_NAME")
-                if not compliance_req_id:
-                    missing_fields.append("COMPLIANCE_REQUIREMENT_ID")
-                
-                if missing_fields:
-                    raise ValueError(f"Row {index + 1}: Missing required fields: {', '.join(missing_fields)}")
-                
-                # Find existing ComplianceRole (do not create if not found)
-                stmt = select(ComplianceRole).where(ComplianceRole.name == role_name)
-                compliance_role = session.execute(stmt).scalar_one_or_none()
-                
-                if not compliance_role:
-                    raise ValueError(f"Row {index + 1}: ComplianceRole '{role_name}' not found in database")
-                
-                # Check if ComplianceRequirement already exists
-                stmt = select(ComplianceRequirement).where(ComplianceRequirement.snowflake_req_id == compliance_req_id)
-                existing_requirement = session.execute(stmt).scalar_one_or_none()
-                
-                if not existing_requirement:
-                    # Create new compliance requirement
-                    compliance_requirement = ComplianceRequirement(
-                        name=compliance_req_name,
-                        snowflake_req_id=compliance_req_id,
-                        compliance_role_id=compliance_role.id
-                    )
-                    session.add(compliance_requirement)
-                    logger.info(f"Created new compliance requirement: {compliance_req_name}")
-                else:
-                    # Update existing requirement if needed
-                    if existing_requirement.name != compliance_req_name:
-                        existing_requirement.name = compliance_req_name
-                        logger.info(f"Updated compliance requirement name: {compliance_req_name}")
-                    
-                    if existing_requirement.compliance_role_id != compliance_role.id:
-                        existing_requirement.compliance_role_id = compliance_role.id
-                        logger.info(f"Updated compliance requirement role association")
-                
-            except Exception as e:
-                logger.error(f"Error processing row {index + 1}: {str(e)}")
-                continue
-        
-        # Commit all changes
-        session.commit()
-        logger.info("Successfully inserted/updated all data")
-        
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Error processing CSV file: {str(e)}")
-        raise
+    # Create separate pie chart for data types (since it couldn't fit in subplot)
+    print("\n📊 Data Types Distribution (Pie Chart):")
+    fig_pie = px.pie(values=dtype_counts.values, names=dtype_counts.index.astype(str), 
+                     title="Data Types Distribution")
+    fig_pie.show()
     
-    finally:
-        session.close()
-
-def insert_with_bulk_operations(csv_file_path, database_url):
-    """
-    Alternative method using bulk operations for better performance with large datasets
-    """
-    engine = create_engine(database_url)
-    Session = sessionmaker(bind=engine)
-    session = Session()
+    # Display missing data table
+    print("\n📋 Missing Values Summary Table:")
+    display(missing_data)
     
-    try:
-        # Read CSV
-        df = pd.read_csv(csv_file_path)
-        df.columns = df.columns.str.strip()
+    # Get Claude's insights on data quality
+    if analyzer.client_available:
+        print(f"\n🤖 Claude's Data Quality Assessment:")
+        print("-" * 40)
         
-        # Clean and prepare data
-        df = df.dropna(subset=['ROLE_NAME', 'COMPLIANCE_REQUIREMENT_ID', 'COMPLIANCE_REQUIREMENT_NAME'])
-        df['ROLE_NAME'] = df['ROLE_NAME'].str.strip()
-        df['COMPLIANCE_REQUIREMENT_ID'] = df['COMPLIANCE_REQUIREMENT_ID'].astype(str).str.strip()
-        df['COMPLIANCE_REQUIREMENT_NAME'] = df['COMPLIANCE_REQUIREMENT_NAME'].str.strip()
+        quality_prompt = f"""
+        Based on this missing values analysis:
+        {missing_data.to_string()}
         
-        # Get existing roles only (do not create new ones)
-        stmt = select(ComplianceRole)
-        existing_roles_result = session.execute(stmt).scalars().all()
-        existing_roles = {role.name: role.id for role in existing_roles_result}
+        What are the main data quality issues? What recommendations do you have for handling missing values?
+        Which columns should I be most concerned about?
+        """
         
-        # Filter out rows where role doesn't exist
-        valid_rows = []
-        skipped_count = 0
-        
-        for _, row in df.iterrows():
-            role_name = row['ROLE_NAME']
-            if role_name not in existing_roles:
-                logger.warning(f"Skipping record: ComplianceRole '{role_name}' not found in database")
-                skipped_count += 1
-                continue
-            valid_rows.append(row)
-        
-        logger.info(f"Processing {len(valid_rows)} valid rows, skipped {skipped_count} rows due to missing roles")
-        
-        if not valid_rows:
-            logger.warning("No valid rows to process")
-            return
-        
-        # Prepare requirements data
-        requirements_to_insert = []
-        requirements_to_update = []
-        
-        for _, row in df.iterrows():
-            role_name = row['ROLE_NAME']
-            req_id = row['COMPLIANCE_REQUIREMENT_ID']
-            req_name = row['COMPLIANCE_REQUIREMENT_NAME']
-            
-            role_id = existing_roles[role_name]  # Safe to access since validation passed
-            
-            # Check if requirement exists
-            stmt = select(ComplianceRequirement).where(ComplianceRequirement.snowflake_req_id == req_id)
-            existing_req = session.execute(stmt).scalar_one_or_none()
-            
-            if not existing_req:
-                requirements_to_insert.append({
-                    'name': req_name,
-                    'snowflake_req_id': req_id,
-                    'compliance_role_id': role_id
-                })
-            else:
-                # Update if necessary
-                if existing_req.name != req_name or existing_req.compliance_role_id != role_id:
-                    requirements_to_update.append({
-                        'id': existing_req.id,
-                        'name': req_name,
-                        'snowflake_req_id': req_id,
-                        'compliance_role_id': role_id
-                    })
-        
-        # Bulk insert requirements
-        if requirements_to_insert:
-            session.bulk_insert_mappings(ComplianceRequirement, requirements_to_insert)
-            logger.info(f"Bulk inserted {len(requirements_to_insert)} compliance requirements")
-        
-        # Bulk update requirements
-        if requirements_to_update:
-            session.bulk_update_mappings(ComplianceRequirement, requirements_to_update)
-            logger.info(f"Bulk updated {len(requirements_to_update)} compliance requirements")
-        
-        session.commit()
-        logger.info("Bulk operations completed successfully")
-        
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Error in bulk operations: {str(e)}")
-        raise
+        quality_insights = analyzer.get_claude_insights(quality_prompt)
+        display(Markdown(quality_insights))
+        analyzer.ai_insights['data_quality'] = quality_insights
     
-    finally:
-        session.close()
-
-# Example usage
-if __name__ == "__main__":
-    # Configuration
-    CSV_FILE_PATH = "compliance_data.csv"  # Update with your CSV file path
-    DATABASE_URL = "sqlite:///compliance.db"  # Update with your database URL
-    
-    # Choose method based on your needs:
-    # Method 1: Row-by-row processing (better for complex logic and error handling)
-    insert_compliance_data_from_csv(CSV_FILE_PATH, DATABASE_URL)
-    
-    # Method 2: Bulk operations (better for large datasets)
-    # insert_with_bulk_operations(CSV_FILE_PATH, DATABASE_URL)
+    return missing_data
