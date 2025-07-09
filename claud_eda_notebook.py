@@ -4,8 +4,8 @@
 # Cell 1: Installation and Setup
 """
 First, install required packages:
-!pip install anthropic pandas numpy matplotlib seaborn plotly jupyter-widgets ipywidgets
-!pip install textblob wordcloud scikit-learn
+!pip install boto3 pandas numpy matplotlib seaborn plotly jupyter-widgets ipywidgets
+!pip install textblob wordcloud scikit-learn langchain-aws
 """
 
 # Cell 2: Import Libraries
@@ -19,8 +19,10 @@ from plotly.subplots import make_subplots
 import warnings
 warnings.filterwarnings('ignore')
 
-# AI and NLP libraries
-import anthropic
+# AWS and AI libraries
+import boto3
+from langchain_aws import ChatBedrockConverse
+from langchain_core.messages import HumanMessage
 from textblob import TextBlob
 from wordcloud import WordCloud
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -41,30 +43,80 @@ sns.set_palette("husl")
 
 print("✅ All libraries imported successfully!")
 
-# Cell 3: Claude API Setup
+# Cell 3: AWS Bedrock Claude Setup
 class ClaudeEDAAnalyzer:
     """
-    Advanced EDA analyzer powered by Claude 3 Sonnet
+    Advanced EDA analyzer powered by Claude 3 Sonnet via AWS Bedrock
     Combines traditional statistical analysis with AI-powered insights
     """
     
-    def __init__(self, api_key=None):
+    def __init__(self, region_name="us-east-1", aws_access_key_id=None, aws_secret_access_key=None, aws_session_token=None):
         """
-        Initialize Claude API client
+        Initialize AWS Bedrock Claude client
         
         Args:
-            api_key (str): Anthropic API key. If None, will look for ANTHROPIC_API_KEY env var
+            region_name (str): AWS region name
+            aws_access_key_id (str): AWS access key ID (optional if using IAM roles/env vars)
+            aws_secret_access_key (str): AWS secret access key (optional if using IAM roles/env vars)
+            aws_session_token (str): AWS session token (optional, for temporary credentials)
         """
-        if api_key is None:
-            api_key = os.getenv('ANTHROPIC_API_KEY')
+        
+        try:
+            # Initialize memory saver
+            from langchain_core.runnables.utils import Input, Output
+            from langchain_core.runnables import RunnableConfig
             
-        if not api_key:
-            print("❌ No API key provided. Please set ANTHROPIC_API_KEY environment variable or pass api_key parameter")
-            print("You can get an API key from: https://console.anthropic.com/")
-            self.client = None
-        else:
-            self.client = anthropic.Anthropic(api_key=api_key)
-            print("✅ Claude API client initialized successfully!")
+            class MemorySaver:
+                def __init__(self):
+                    self.memory = {}
+                
+                def get(self, config):
+                    return self.memory.get(config.get("configurable", {}).get("thread_id", "default"), {})
+                
+                def put(self, config, checkpoint):
+                    thread_id = config.get("configurable", {}).get("thread_id", "default")
+                    self.memory[thread_id] = checkpoint
+            
+            memory = MemorySaver()
+            
+            # Set up AWS credentials if provided
+            session_kwargs = {}
+            if aws_access_key_id:
+                session_kwargs['aws_access_key_id'] = aws_access_key_id
+            if aws_secret_access_key:
+                session_kwargs['aws_secret_access_key'] = aws_secret_access_key
+            if aws_session_token:
+                session_kwargs['aws_session_token'] = aws_session_token
+            
+            # Create boto3 session
+            if session_kwargs:
+                session = boto3.Session(region_name=region_name, **session_kwargs)
+            else:
+                session = boto3.Session(region_name=region_name)
+            
+            # Initialize Claude client via Bedrock
+            self.llm = ChatBedrockConverse(
+                model_id="anthropic.claude-3-sonnet-20240229-v1:0",
+                region_name=region_name,
+                aws_access_key_id=aws_access_key_id,
+                aws_secret_access_key=aws_secret_access_key,
+                aws_session_token=aws_session_token,
+                provider="anthropic",
+            )
+            
+            print("✅ Claude via AWS Bedrock initialized successfully!")
+            print(f"📍 Region: {region_name}")
+            print(f"🤖 Model: anthropic.claude-3-sonnet-20240229-v1:0")
+            self.client_available = True
+            
+        except Exception as e:
+            print(f"❌ Error initializing AWS Bedrock Claude: {str(e)}")
+            print("Please ensure you have:")
+            print("1. AWS credentials configured (AWS CLI, IAM role, or environment variables)")
+            print("2. Bedrock access enabled in your AWS account")
+            print("3. Required packages installed: boto3, langchain-aws")
+            self.llm = None
+            self.client_available = False
             
         self.df = None
         self.analysis_results = {}
@@ -91,14 +143,14 @@ class ClaudeEDAAnalyzer:
     
     def get_claude_insights(self, prompt, data_summary=""):
         """
-        Get insights from Claude 3 Sonnet
+        Get insights from Claude 3 Sonnet via AWS Bedrock
         
         Args:
             prompt (str): The question/prompt for Claude
             data_summary (str): Optional data summary to provide context
         """
-        if self.client is None:
-            return "❌ Claude API not available. Please configure API key."
+        if not self.client_available:
+            return "❌ Claude via AWS Bedrock not available. Please configure AWS credentials and Bedrock access."
         
         try:
             full_prompt = f"""
@@ -111,18 +163,35 @@ class ClaudeEDAAnalyzer:
             {prompt}
             
             Please provide detailed, actionable insights based on the data. Be specific and practical.
+            Focus on patterns, trends, and recommendations that would be valuable for decision-making.
             """
             
-            message = self.client.messages.create(
-                model="claude-3-sonnet-20240229",
-                max_tokens=1500,
-                messages=[{"role": "user", "content": full_prompt}]
-            )
+            # Create message
+            messages = [HumanMessage(content=full_prompt)]
             
-            return message.content[0].text
+            # Get response from Claude
+            response = self.llm.invoke(messages)
+            
+            return response.content
             
         except Exception as e:
-            return f"❌ Error getting Claude insights: {str(e)}"
+            error_msg = f"❌ Error getting Claude insights: {str(e)}"
+            print(error_msg)
+            return error_msg
+    
+    def test_connection(self):
+        """Test the connection to Claude via AWS Bedrock"""
+        if not self.client_available:
+            print("❌ Claude client not available")
+            return False
+        
+        try:
+            test_response = self.get_claude_insights("Hello, please respond with 'Connection successful' to confirm you're working.")
+            print(f"🧪 Test Response: {test_response}")
+            return "Connection successful" in test_response or "working" in test_response.lower()
+        except Exception as e:
+            print(f"❌ Connection test failed: {e}")
+            return False
     
     def generate_data_summary(self):
         """Generate a comprehensive data summary for Claude context"""
@@ -154,11 +223,21 @@ class ClaudeEDAAnalyzer:
         
         return summary
 
-# Initialize the analyzer
-# Note: Replace 'your_api_key_here' with your actual Anthropic API key
-# or set the ANTHROPIC_API_KEY environment variable
-analyzer = ClaudeEDAAnalyzer()  # Will use environment variable
-# analyzer = ClaudeEDAAnalyzer(api_key='your_api_key_here')  # Or pass directly
+# Initialize the analyzer with AWS credentials
+# Option 1: Use default AWS credentials (recommended)
+analyzer = ClaudeEDAAnalyzer()
+
+# Option 2: Explicitly provide AWS credentials
+# analyzer = ClaudeEDAAnalyzer(
+#     region_name="us-east-1",
+#     aws_access_key_id="YOUR_ACCESS_KEY_ID",
+#     aws_secret_access_key="YOUR_SECRET_ACCESS_KEY",
+#     aws_session_token="YOUR_SESSION_TOKEN"  # Optional, for temporary credentials
+# )
+
+# Test the connection
+print("\n🧪 Testing connection to Claude via AWS Bedrock...")
+analyzer.test_connection()
 
 # Cell 4: Data Loading and Basic Overview
 def load_and_overview(file_path):
@@ -264,7 +343,7 @@ def create_data_quality_dashboard(df):
     fig.show()
     
     # Get Claude's insights on data quality
-    if analyzer.client:
+    if analyzer.client_available:
         print(f"\n🤖 Claude's Data Quality Assessment:")
         print("-" * 40)
         
@@ -332,7 +411,7 @@ def analyze_categorical_with_claude(df, max_categories=10):
             fig.show()
         
         # Get Claude's insights for this column
-        if analyzer.client:
+        if analyzer.client_available:
             col_summary = f"""
             Column: {col}
             Unique values: {unique_count}
@@ -416,7 +495,7 @@ def analyze_numerical_with_claude(df):
         plt.show()
         
         # Get Claude's insights on correlations
-        if analyzer.client:
+        if analyzer.client_available:
             corr_insights = analyzer.get_claude_insights(
                 f"Analyze this correlation matrix and identify interesting patterns, strong correlations, and potential relationships: {correlation_matrix.to_string()}",
                 f"Numerical columns: {numerical_cols}"
@@ -427,7 +506,7 @@ def analyze_numerical_with_claude(df):
             analyzer.ai_insights['correlation_analysis'] = corr_insights
     
     # Get Claude's overall numerical insights
-    if analyzer.client:
+    if analyzer.client_available:
         num_summary = df[numerical_cols].describe().to_string()
         
         numerical_insights = analyzer.get_claude_insights(
@@ -500,7 +579,7 @@ def analyze_text_with_claude(df, text_column):
         print(f"Could not generate word cloud: {e}")
     
     # Sample text analysis with Claude
-    if analyzer.client and len(text_data) > 0:
+    if analyzer.client_available and len(text_data) > 0:
         # Get sample texts for Claude analysis
         sample_texts = text_data.sample(min(10, len(text_data))).tolist()
         
@@ -572,7 +651,7 @@ def create_relationship_explorer(df):
         fig.show()
         
         # Get Claude's insights on this relationship
-        if analyzer.client:
+        if analyzer.client_available:
             # Calculate basic statistics for the relationship
             if x_col in numerical_cols and y_col in numerical_cols:
                 correlation = plot_data[x_col].corr(plot_data[y_col])
@@ -672,7 +751,7 @@ def detect_anomalies_with_claude(df, threshold=3):
             plt.show()
     
     # Get Claude's insights on anomalies
-    if analyzer.client and anomalies_found:
+    if analyzer.client_available and anomalies_found:
         anomaly_summary = ""
         for col, info in anomalies_found.items():
             anomaly_summary += f"\n{col}: {info['count']} outliers ({info['percentage']:.1f}%)"
@@ -794,8 +873,8 @@ def generate_comprehensive_report():
 def generate_smart_questions():
     """Generate intelligent follow-up questions based on the dataset"""
     
-    if analyzer.client is None or analyzer.df is None:
-        print("❌ Claude API or dataset not available.")
+    if not analyzer.client_available or analyzer.df is None:
+        print("❌ Claude client or dataset not available.")
         return
     
     print("❓ GENERATING SMART FOLLOW-UP QUESTIONS")
@@ -890,7 +969,7 @@ def create_advanced_visualizations():
     print("=" * 50)
     
     # Get visualization recommendations from Claude
-    if analyzer.client:
+    if analyzer.client_available:
         viz_context = f"""
         Dataset info:
         - Shape: {analyzer.df.shape}
@@ -972,8 +1051,8 @@ def create_advanced_visualizations():
 def recommend_models_with_claude():
     """Get machine learning model recommendations from Claude"""
     
-    if analyzer.client is None or analyzer.df is None:
-        print("❌ Claude API or dataset not available.")
+    if not analyzer.client_available or analyzer.df is None:
+        print("❌ Claude client or dataset not available.")
         return
     
     print("🤖 AI MODEL RECOMMENDATION ENGINE")
@@ -1102,20 +1181,36 @@ def run_complete_eda_pipeline(file_path):
 
 # Cell 16: Quick Start Guide and Examples
 print("""
-🎯 CLAUDE 3 SONNET POWERED EDA - QUICK START GUIDE
+🎯 CLAUDE 3 SONNET VIA AWS BEDROCK - QUICK START GUIDE
 ================================================================
 
-1. SETUP YOUR API KEY:
-   Option A: Set environment variable
-   export ANTHROPIC_API_KEY="your_api_key_here"
+1. SETUP AWS CREDENTIALS:
+   Option A: AWS CLI
+   aws configure
    
-   Option B: Pass directly in code
-   analyzer = ClaudeEDAAnalyzer(api_key="your_api_key_here")
+   Option B: Environment variables
+   export AWS_ACCESS_KEY_ID="your_access_key"
+   export AWS_SECRET_ACCESS_KEY="your_secret_key"
+   export AWS_DEFAULT_REGION="us-east-1"
+   
+   Option C: IAM Role (recommended for EC2/Lambda)
+   
+   Option D: Pass directly in code
+   analyzer = ClaudeEDAAnalyzer(
+       aws_access_key_id="your_key",
+       aws_secret_access_key="your_secret",
+       region_name="us-east-1"
+   )
 
-2. RUN COMPLETE ANALYSIS:
+2. ENSURE BEDROCK ACCESS:
+   - Enable Amazon Bedrock in your AWS account
+   - Request access to Claude 3 Sonnet model
+   - Ensure proper IAM permissions for Bedrock
+
+3. RUN COMPLETE ANALYSIS:
    df, insights = run_complete_eda_pipeline('your_data.csv')
 
-3. RUN INDIVIDUAL ANALYSES:
+4. RUN INDIVIDUAL ANALYSES:
    # Basic overview
    df = load_and_overview('your_data.csv')
    
@@ -1134,14 +1229,14 @@ print("""
    # Generate questions
    generate_smart_questions()
 
-4. INTERACTIVE FEATURES:
+5. INTERACTIVE FEATURES:
    # Relationship explorer
    create_relationship_explorer(df)
    
    # Custom visualizations
    create_advanced_visualizations()
 
-5. GET CUSTOM INSIGHTS:
+6. GET CUSTOM INSIGHTS:
    # Ask Claude specific questions
    custom_insight = analyzer.get_claude_insights(
        "What patterns do you see in this data?",
@@ -1150,6 +1245,46 @@ print("""
 
 ================================================================
 🚀 READY TO START! Replace 'your_data.csv' with your file path
+================================================================
+
+⚠️  IMPORTANT NOTES:
+- Ensure you have AWS Bedrock access enabled
+- Claude 3 Sonnet must be available in your region
+- Check AWS costs for Bedrock usage
+- Test connection before running full analysis
+""")
+
+# Example usage cell - uncomment and modify as needed:
+"""
+# EXAMPLE USAGE:
+
+# 1. Initialize with AWS credentials (automatic detection)
+analyzer = ClaudeEDAAnalyzer()
+
+# Or with explicit credentials:
+# analyzer = ClaudeEDAAnalyzer(
+#     region_name="us-east-1",
+#     aws_access_key_id="YOUR_ACCESS_KEY_ID",
+#     aws_secret_access_key="YOUR_SECRET_ACCESS_KEY"
+# )
+
+# 2. Test connection
+analyzer.test_connection()
+
+# 3. Run complete analysis
+df, insights = run_complete_eda_pipeline('your_data.csv')
+
+# 4. Or run step by step:
+# df = load_and_overview('your_data.csv')
+# create_data_quality_dashboard(df)
+# analyze_categorical_with_claude(df)
+# analyze_numerical_with_claude(df)
+
+# 5. Generate custom insights
+# custom_question = "What are the most important variables for predicting customer churn?"
+# insight = analyzer.get_claude_insights(custom_question, analyzer.generate_data_summary())
+# display(Markdown(insight))
+""" your file path
 ================================================================
 """)
 
