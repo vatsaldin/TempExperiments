@@ -1,3 +1,44 @@
+
+# association object for employee compliance statuses
+class EmployeeComplianceStatus(BaseModel):
+    __tablename__ = "employee_compliance_status"
+    
+    employee_id: Mapped[int] = mapped_column(
+        ForeignKey("employee.id"), primary_key=True
+    )
+    compliance_requirement_id: Mapped[int] = mapped_column(
+        ForeignKey("compliance_requirement.id"), primary_key=True
+    )
+    
+    status: Mapped[str] = mapped_column(String(20))  # e.g., "Completed", "Assigned"
+    
+    # Date fields for compliance tracking
+    compliance_requirement_assigned_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    compliance_requirement_acquired_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    compliance_requirement_expires_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    
+    employee: Mapped["Employee"] = relationship(back_populates="compliance_statuses")
+    compliance_requirement: Mapped["ComplianceRequirement"] = relationship(
+        back_populates="employee_compliance_statuses"
+    )
+
+-------------------------------
+
+# Example Alembic migration
+def upgrade():
+    op.add_column('employee_compliance_status', 
+                  sa.Column('compliance_requirement_assigned_on', sa.Date(), nullable=True))
+    op.add_column('employee_compliance_status', 
+                  sa.Column('compliance_requirement_acquired_on', sa.Date(), nullable=True))
+    op.add_column('employee_compliance_status', 
+                  sa.Column('compliance_requirement_expires_on', sa.Date(), nullable=True))
+
+
+
+
+
+
+-----------------------
 import pandas as pd
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
