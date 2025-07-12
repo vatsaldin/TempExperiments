@@ -1,9 +1,0 @@
-# Get list of WOP_IDs found in employee table
-wop_ids_in_db = [emp.wop_id for emp in employees_result if emp.wop_id]
-print(f"WOP_IDs found in employee table ({len(wop_ids_in_db)}): {sorted(wop_ids_in_db)}")
-
-print(f"\n=== PROCESSING SUMMARY ===")
-print(f"Total records processed: {processed_count}")
-print(f"New records inserted: {inserted_count}")
-print(f"Existing records updated: {updated_count}")
-print(f"Successfully completed!")
