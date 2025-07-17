@@ -1,1 +1,602 @@
+import pandas as pd
+import numpy as np
+import time
+import json
+import os
+from datetime import datetime
+import warnings
+import boto3
+from botocore.exceptions import ReadTimeoutError, ClientError, EndpointConnectionError
+import logging
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class RobustClaudeAnalyzer:
+    """
+    Robust Claude analyzer with comprehensive error handling and timeout management
+    """
+    
+    def __init__(self, region_name="us-east-1", max_retries=3, timeout_seconds=300):
+        """
+        Initialize robust Claude analyzer
+        
+        Args:
+            region_name: AWS region
+            max_retries: Maximum number of retry attempts
+            timeout_seconds: Timeout for API calls in seconds
+        """
+        self.region_name = region_name
+        self.max_retries = max_retries
+        self.timeout_seconds = timeout_seconds
+        self.client_available = False
+        
+        # Initialize Bedrock client with timeout configuration
+        self.initialize_bedrock_client()
+        
+        # Analysis configuration
+        self.analysis_config = {
+            'max_tokens_per_request': 4000,  # Reduced to prevent timeouts
+            'chunk_size': 50,  # Process comments in smaller chunks
+            'retry_delay': 5,  # Seconds to wait between retries
+            'fallback_enabled': True
+        }
+        
+        # Results storage
+        self.analysis_results = {}
+        self.partial_results = []
+    
+    def initialize_bedrock_client(self):
+        """Initialize Bedrock client with proper timeout configuration"""
+        try:
+            # Configure boto3 with custom timeouts
+            config = boto3.session.Config(
+                region_name=self.region_name,
+                retries={'max_attempts': self.max_retries},
+                read_timeout=self.timeout_seconds,
+                connect_timeout=30
+            )
+            
+            # Create bedrock runtime client
+            self.bedrock_runtime = boto3.client(
+                'bedrock-runtime',
+                config=config
+            )
+            
+            # Test connection
+            self.test_connection()
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Bedrock client: {e}")
+            self.client_available = False
+    
+    def test_connection(self):
+        """Test connection to Bedrock Claude"""
+        try:
+            # Simple test request
+            test_prompt = "Hello, please respond with 'Connection successful'"
+            
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 100,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": test_prompt
+                    }
+                ]
+            })
+            
+            response = self.bedrock_runtime.invoke_model(
+                modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                body=body,
+                contentType="application/json",
+                accept="application/json"
+            )
+            
+            response_body = json.loads(response['body'].read())
+            
+            if 'content' in response_body and len(response_body['content']) > 0:
+                logger.info("✅ Claude connection test successful")
+                self.client_available = True
+            else:
+                logger.warning("⚠️ Claude connection test returned unexpected response")
+                self.client_available = False
+                
+        except Exception as e:
+            logger.error(f"❌ Claude connection test failed: {e}")
+            self.client_available = False
+    
+    def make_robust_api_call(self, prompt, max_tokens=4000):
+        """
+        Make robust API call with retry logic and timeout handling
+        
+        Args:
+            prompt: The prompt to send to Claude
+            max_tokens: Maximum tokens for response
+            
+        Returns:
+            API response or None if failed
+        """
+        
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(f"🔄 API call attempt {attempt + 1}/{self.max_retries}")
+                
+                # Prepare request body
+                body = json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": max_tokens,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "temperature": 0.1,
+                    "top_k": 250,
+                    "top_p": 0.999
+                })
+                
+                # Make API call with timeout
+                start_time = time.time()
+                
+                response = self.bedrock_runtime.invoke_model(
+                    modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                    body=body,
+                    contentType="application/json",
+                    accept="application/json"
+                )
+                
+                end_time = time.time()
+                logger.info(f"⏱️ API call completed in {end_time - start_time:.2f} seconds")
+                
+                # Parse response
+                response_body = json.loads(response['body'].read())
+                
+                if 'content' in response_body and len(response_body['content']) > 0:
+                    return response_body['content'][0]['text']
+                else:
+                    logger.warning("⚠️ Empty response from Claude")
+                    return None
+                    
+            except ReadTimeoutError as e:
+                logger.warning(f"⏰ Timeout error on attempt {attempt + 1}: {e}")
+                if attempt < self.max_retries - 1:
+                    wait_time = self.analysis_config['retry_delay'] * (attempt + 1)
+                    logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error("❌ All retry attempts failed due to timeout")
+                    return None
+                    
+            except EndpointConnectionError as e:
+                logger.error(f"🔌 Connection error: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.analysis_config['retry_delay'])
+                    continue
+                else:
+                    return None
+                    
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                logger.error(f"🚨 AWS Client error: {error_code} - {e}")
+                
+                if error_code in ['ThrottlingException', 'ServiceUnavailable']:
+                    if attempt < self.max_retries - 1:
+                        wait_time = self.analysis_config['retry_delay'] * (2 ** attempt)  # Exponential backoff
+                        logger.info(f"⏳ Exponential backoff: waiting {wait_time} seconds...")
+                        time.sleep(wait_time)
+                        continue
+                return None
+                
+            except Exception as e:
+                logger.error(f"🚨 Unexpected error: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.analysis_config['retry_delay'])
+                    continue
+                else:
+                    return None
+        
+        return None
+    
+    def chunk_comments_analysis(self, df, chunk_size=50):
+        """
+        Analyze comments in smaller chunks to avoid timeouts
+        
+        Args:
+            df: DataFrame with comments
+            chunk_size: Number of comments per chunk
+            
+        Returns:
+            Combined analysis results
+        """
+        
+        print(f"🔄 Processing comments in chunks of {chunk_size}...")
+        
+        # Get clean comments
+        comments_df = df[df['COMMENT'].notna() & (df['COMMENT'] != '')].copy()
+        total_comments = len(comments_df)
+        
+        print(f"📊 Total comments to analyze: {total_comments}")
+        
+        # Split into chunks
+        chunks = []
+        for i in range(0, len(comments_df), chunk_size):
+            chunk = comments_df.iloc[i:i+chunk_size]
+            chunks.append(chunk)
+        
+        print(f"📦 Created {len(chunks)} chunks")
+        
+        # Analyze each chunk
+        chunk_results = []
+        
+        for i, chunk in enumerate(chunks):
+            print(f"\n🔍 Processing chunk {i+1}/{len(chunks)} ({len(chunk)} comments)...")
+            
+            # Create chunk-specific prompt
+            chunk_prompt = self.create_chunk_prompt(chunk, i+1, len(chunks))
+            
+            # Make API call for this chunk
+            result = self.make_robust_api_call(chunk_prompt, max_tokens=3000)
+            
+            if result:
+                chunk_results.append({
+                    'chunk_id': i+1,
+                    'comment_count': len(chunk),
+                    'analysis': result,
+                    'status': 'success'
+                })
+                print(f"✅ Chunk {i+1} analysis completed")
+                
+                # Save partial result
+                self.save_partial_result(chunk_results[-1], i+1)
+                
+            else:
+                print(f"❌ Chunk {i+1} analysis failed")
+                chunk_results.append({
+                    'chunk_id': i+1,
+                    'comment_count': len(chunk),
+                    'analysis': None,
+                    'status': 'failed'
+                })
+            
+            # Brief pause between chunks
+            if i < len(chunks) - 1:
+                time.sleep(2)
+        
+        # Combine results
+        return self.combine_chunk_results(chunk_results, total_comments)
+    
+    def create_chunk_prompt(self, chunk_df, chunk_num, total_chunks):
+        """Create analysis prompt for a specific chunk"""
+        
+        # Sample comments from the chunk
+        sample_comments = []
+        for idx, row in chunk_df.iterrows():
+            comment_data = {
+                'comment': str(row['COMMENT'])[:400],  # Limit length
+                'response': row.get('RESPONSE', 'Unknown'),
+                'site': row.get('SITE_NAME', 'Unknown'),
+                'facility': row.get('FACILITY_AREA', 'Unknown'),
+                'date': row.get('INSPECTION_DATE', 'Unknown')
+            }
+            sample_comments.append(comment_data)
+        
+        prompt = f"""
+You are analyzing safety inspection comments from offshore drilling operations.
+
+CHUNK INFORMATION:
+- Chunk {chunk_num} of {total_chunks}
+- Comments in this chunk: {len(chunk_df)}
+- Analysis focus: Extract key themes, issues, and observations
+
+COMMENTS TO ANALYZE:
+"""
+        
+        for i, comment_data in enumerate(sample_comments, 1):
+            prompt += f"""
+{i}. Response: {comment_data['response']} | Site: {comment_data['site']} | Area: {comment_data['facility']}
+   Comment: "{comment_data['comment']}"
+"""
+        
+        prompt += f"""
+
+ANALYSIS REQUEST (for this chunk only):
+1. **Key Themes** - Identify 3-5 main themes in these comments
+2. **Safety Issues** - List specific safety concerns mentioned
+3. **Positive Observations** - Note good practices or compliance
+4. **Common Keywords** - Extract frequently mentioned terms
+5. **Risk Categories** - Categorize the types of risks mentioned
+
+RESPONSE FORMAT:
+- Be concise and specific
+- Use bullet points
+- Include brief quote examples
+- Focus on actionable insights
+
+Please analyze this chunk and provide insights that can be combined with other chunks.
+"""
+        
+        return prompt
+    
+    def save_partial_result(self, result, chunk_id):
+        """Save partial result to file"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"chunk_analysis_{chunk_id}_{timestamp}.txt"
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(f"CHUNK {chunk_id} ANALYSIS RESULT\n")
+            f.write("="*50 + "\n")
+            f.write(f"Comments analyzed: {result['comment_count']}\n")
+            f.write(f"Status: {result['status']}\n")
+            f.write(f"Timestamp: {datetime.now()}\n")
+            f.write("="*50 + "\n\n")
+            
+            if result['analysis']:
+                f.write(result['analysis'])
+            else:
+                f.write("Analysis failed for this chunk.")
+        
+        print(f"💾 Partial result saved: {filename}")
+    
+    def combine_chunk_results(self, chunk_results, total_comments):
+        """Combine analysis results from all chunks"""
+        
+        print(f"\n🔄 Combining results from {len(chunk_results)} chunks...")
+        
+        successful_chunks = [r for r in chunk_results if r['status'] == 'success']
+        failed_chunks = [r for r in chunk_results if r['status'] == 'failed']
+        
+        print(f"✅ Successful chunks: {len(successful_chunks)}")
+        print(f"❌ Failed chunks: {len(failed_chunks)}")
+        
+        if not successful_chunks:
+            print("❌ No successful chunk analysis. Creating fallback analysis...")
+            return self.create_fallback_analysis(total_comments)
+        
+        # Create summary prompt
+        summary_prompt = f"""
+You are combining analysis results from {len(successful_chunks)} chunks of safety inspection comments.
+
+CHUNK RESULTS TO COMBINE:
+"""
+        
+        for i, result in enumerate(successful_chunks, 1):
+            summary_prompt += f"""
+CHUNK {result['chunk_id']} ({result['comment_count']} comments):
+{result['analysis']}
+
+---
+"""
+        
+        summary_prompt += f"""
+
+FINAL SYNTHESIS REQUEST:
+Please combine these chunk analyses into a comprehensive summary with:
+
+1. **OVERALL THEMES** - Top 5-7 themes across all chunks
+2. **COMMON SAFETY ISSUES** - Most frequently mentioned problems
+3. **POSITIVE OBSERVATIONS** - Good practices identified
+4. **IMPROVEMENT OPPORTUNITIES** - Areas needing attention
+5. **RISK ASSESSMENT** - Overall risk categories and severity
+6. **EXECUTIVE SUMMARY** - Key findings and recommendations
+
+Total comments analyzed: {sum(r['comment_count'] for r in successful_chunks)}
+Success rate: {len(successful_chunks)}/{len(chunk_results)} chunks
+
+Please provide a cohesive, actionable analysis.
+"""
+        
+        # Make final API call to combine results
+        print("🔄 Making final API call to combine chunk results...")
+        combined_result = self.make_robust_api_call(summary_prompt, max_tokens=4000)
+        
+        if combined_result:
+            # Save final result
+            final_result = {
+                'total_comments': total_comments,
+                'successful_chunks': len(successful_chunks),
+                'failed_chunks': len(failed_chunks),
+                'analysis': combined_result,
+                'chunk_details': chunk_results
+            }
+            
+            self.save_final_analysis(final_result)
+            return final_result
+        else:
+            print("❌ Final combination failed. Using best available chunk result...")
+            return self.create_best_available_analysis(successful_chunks, total_comments)
+    
+    def create_fallback_analysis(self, total_comments):
+        """Create fallback analysis when API calls fail"""
+        fallback_content = f"""
+FALLBACK ANALYSIS REPORT
+========================
+
+Due to API connectivity issues, automated analysis could not be completed.
+However, here are recommended manual analysis steps:
+
+MANUAL ANALYSIS RECOMMENDATIONS:
+1. **Text Mining Approach**:
+   - Search for common keywords: "equipment", "training", "procedure", "safety"
+   - Count frequency of terms like "effective", "ineffective", "issue", "concern"
+   
+2. **Categorization Strategy**:
+   - Group comments by response type (Effective vs Ineffective)
+   - Sort by site and facility area
+   - Look for patterns in dates/timeframes
+   
+3. **Key Areas to Investigate**:
+   - Equipment-related comments
+   - Training and competency issues
+   - Procedural compliance
+   - Communication effectiveness
+   
+4. **Statistical Analysis**:
+   - Calculate percentage of positive vs negative comments
+   - Identify most active sites/facilities
+   - Track trends over time
+   
+NEXT STEPS:
+- Review individual comment files saved during processing
+- Consider reducing batch size and retrying
+- Use alternative analysis tools if needed
+
+Total comments requiring analysis: {total_comments}
+"""
+        
+        return {
+            'total_comments': total_comments,
+            'analysis': fallback_content,
+            'status': 'fallback',
+            'timestamp': datetime.now()
+        }
+    
+    def save_final_analysis(self, result):
+        """Save final combined analysis to file"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"safety_comment_analysis_final_{timestamp}.txt"
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("="*80 + "\n")
+            f.write("CLAUDE SAFETY INSPECTION COMMENT ANALYSIS - FINAL REPORT\n")
+            f.write("="*80 + "\n")
+            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total comments analyzed: {result['total_comments']}\n")
+            f.write(f"Successful chunks: {result['successful_chunks']}\n")
+            f.write(f"Failed chunks: {result['failed_chunks']}\n")
+            f.write(f"Success rate: {(result['successful_chunks']/(result['successful_chunks']+result['failed_chunks']))*100:.1f}%\n")
+            f.write("="*80 + "\n\n")
+            f.write(result['analysis'])
+        
+        print(f"📄 Final analysis saved: {filename}")
+    
+    def create_best_available_analysis(self, successful_chunks, total_comments):
+        """Create analysis from best available chunk when combination fails"""
+        if not successful_chunks:
+            return self.create_fallback_analysis(total_comments)
+        
+        # Use the chunk with most comments as primary
+        best_chunk = max(successful_chunks, key=lambda x: x['comment_count'])
+        
+        analysis_content = f"""
+PARTIAL ANALYSIS REPORT (BEST AVAILABLE)
+========================================
+
+Note: This analysis is based on the most complete chunk due to API limitations.
+
+CHUNK DETAILS:
+- Chunk ID: {best_chunk['chunk_id']}
+- Comments analyzed: {best_chunk['comment_count']} out of {total_comments} total
+- Representation: {(best_chunk['comment_count']/total_comments)*100:.1f}% of total comments
+
+ANALYSIS RESULTS:
+{best_chunk['analysis']}
+
+LIMITATIONS:
+- This represents only a portion of your complete dataset
+- For full analysis, consider running smaller batches
+- Some patterns may not be visible in this subset
+
+RECOMMENDATIONS:
+- Review all chunk files for additional insights
+- Consider manual review of remaining comments
+- Retry analysis with smaller chunk sizes if needed
+"""
+        
+        return {
+            'total_comments': total_comments,
+            'analyzed_comments': best_chunk['comment_count'],
+            'analysis': analysis_content,
+            'status': 'partial',
+            'timestamp': datetime.now()
+        }
+
+# Main execution function
+def run_robust_comment_analysis(file_path, chunk_size=30, max_retries=3):
+    """
+    Run robust comment analysis with comprehensive error handling
+    
+    Args:
+        file_path: Path to CSV file
+        chunk_size: Number of comments per chunk (smaller = more reliable)
+        max_retries: Maximum retry attempts per chunk
+    
+    Returns:
+        Analysis results
+    """
+    
+    print("🚀 Starting Robust Safety Comment Analysis...")
+    print("="*80)
+    
+    try:
+        # Load data
+        print("📊 Loading data...")
+        df = pd.read_csv(file_path)
+        print(f"✅ Loaded {len(df)} records")
+        
+        # Initialize robust analyzer
+        print("🔧 Initializing Claude analyzer...")
+        analyzer = RobustClaudeAnalyzer(max_retries=max_retries)
+        
+        if not analyzer.client_available:
+            print("❌ Claude client not available. Check AWS credentials and Bedrock access.")
+            return None
+        
+        # Run chunked analysis
+        print(f"🔄 Starting chunked analysis (chunk size: {chunk_size})...")
+        results = analyzer.chunk_comments_analysis(df, chunk_size=chunk_size)
+        
+        print(f"\n✅ Analysis completed!")
+        print(f"📊 Results summary:")
+        if 'total_comments' in results:
+            print(f"   Total comments: {results['total_comments']}")
+        if 'successful_chunks' in results:
+            print(f"   Successful chunks: {results['successful_chunks']}")
+        if 'failed_chunks' in results:
+            print(f"   Failed chunks: {results['failed_chunks']}")
+        
+        return results
+        
+    except Exception as e:
+        print(f"❌ Error in analysis pipeline: {e}")
+        return None
+
+# Example usage
+if __name__ == "__main__":
+    
+    print("="*80)
+    print("ROBUST CLAUDE COMMENT ANALYSIS WITH TIMEOUT HANDLING")
+    print("="*80)
+    
+    # Configuration
+    file_path = "your_safety_inspection_data.csv"  # Update with your file path
+    
+    # Run analysis with error handling
+    results = run_robust_comment_analysis(
+        file_path=file_path,
+        chunk_size=25,  # Smaller chunks for reliability
+        max_retries=3   # Retry failed chunks
+    )
+    
+    if results:
+        print("\n🎯 Analysis completed successfully!")
+        print("📁 Check generated files for detailed results")
+    else:
+        print("\n❌ Analysis failed. Check logs for details.")
+    
+    print("\n" + "="*80)
+    print("ROBUST ANALYSIS FEATURES:")
+    print("="*80)
+    print("✅ Timeout handling with automatic retries")
+    print("✅ Chunked processing to avoid large request timeouts")
+    print("✅ Exponential backoff for rate limiting")
+    print("✅ Partial result saving during processing")
+    print("✅ Fallback analysis when API fails")
+    print("✅ Comprehensive error logging")
+    print("✅ Multiple retry strategies")
+    print("✅ Connection testing before analysis")
+    print("\n🚀 Handles large datasets reliably!")
