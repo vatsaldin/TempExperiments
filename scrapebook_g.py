@@ -8,32 +8,55 @@ from plotly.subplots import make_subplots
 import plotly.io as pio
 import base64
 import io
-from datetime import datetime
-import os
+import time
 import json
+import os
+from datetime import datetime
 import warnings
+import boto3
+from botocore.exceptions import ReadTimeoutError, ClientError, EndpointConnectionError
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 warnings.filterwarnings('ignore')
 
-class SafetyAnalysisHTMLReportGenerator:
+class IntegratedSafetyAnalysisSystem:
     """
-    Generate professional HTML reports for safety inspection comment analysis
+    Complete integrated system for safety inspection analysis with:
+    - Robust Claude API handling with timeout management
+    - Chunked comment analysis for large datasets
+    - Professional HTML report generation
+    - Interactive visualizations and insights
     """
     
-    def __init__(self, df, claude_analysis=None, report_title="Safety Inspection Analysis Report"):
+    def __init__(self, region_name="us-east-1", max_retries=3, timeout_seconds=300):
         """
-        Initialize HTML report generator
+        Initialize the integrated analysis system
         
         Args:
-            df: DataFrame with safety inspection data
-            claude_analysis: Results from Claude analysis (optional)
-            report_title: Title for the report
+            region_name: AWS region for Bedrock
+            max_retries: Maximum retry attempts for API calls
+            timeout_seconds: Timeout for API calls in seconds
         """
-        self.df = df
-        self.claude_analysis = claude_analysis
-        self.report_title = report_title
-        self.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.region_name = region_name
+        self.max_retries = max_retries
+        self.timeout_seconds = timeout_seconds
+        self.client_available = False
         
-        # Report styling configuration
+        # Initialize Bedrock client
+        self.initialize_bedrock_client()
+        
+        # Analysis configuration
+        self.analysis_config = {
+            'max_tokens_per_request': 4000,
+            'chunk_size': 30,  # Comments per chunk
+            'retry_delay': 5,  # Seconds between retries
+            'fallback_enabled': True
+        }
+        
+        # Report styling
         self.colors = {
             'primary': '#2E86AB',
             'secondary': '#A23B72', 
@@ -45,9 +68,462 @@ class SafetyAnalysisHTMLReportGenerator:
             'dark': '#343a40'
         }
         
-        # Initialize chart counter
+        # Results storage
+        self.df = None
+        self.claude_analysis = None
+        self.analysis_results = {}
+        self.partial_results = []
         self.chart_counter = 1
+    
+    def initialize_bedrock_client(self):
+        """Initialize Bedrock client with timeout configuration"""
+        try:
+            config = boto3.session.Config(
+                region_name=self.region_name,
+                retries={'max_attempts': self.max_retries},
+                read_timeout=self.timeout_seconds,
+                connect_timeout=30
+            )
+            
+            self.bedrock_runtime = boto3.client('bedrock-runtime', config=config)
+            self.test_connection()
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Bedrock client: {e}")
+            self.client_available = False
+    
+    def test_connection(self):
+        """Test connection to Bedrock Claude"""
+        try:
+            test_prompt = "Hello, please respond with 'Connection successful'"
+            
+            body = json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": test_prompt}]
+            })
+            
+            response = self.bedrock_runtime.invoke_model(
+                modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                body=body,
+                contentType="application/json",
+                accept="application/json"
+            )
+            
+            response_body = json.loads(response['body'].read())
+            
+            if 'content' in response_body and len(response_body['content']) > 0:
+                logger.info("✅ Claude connection test successful")
+                self.client_available = True
+            else:
+                self.client_available = False
+                
+        except Exception as e:
+            logger.error(f"❌ Claude connection test failed: {e}")
+            self.client_available = False
+    
+    def make_robust_api_call(self, prompt, max_tokens=4000):
+        """Make robust API call with retry logic"""
+        for attempt in range(self.max_retries):
+            try:
+                logger.info(f"🔄 API call attempt {attempt + 1}/{self.max_retries}")
+                
+                body = json.dumps({
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": max_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "top_k": 250,
+                    "top_p": 0.999
+                })
+                
+                start_time = time.time()
+                
+                response = self.bedrock_runtime.invoke_model(
+                    modelId="anthropic.claude-3-sonnet-20240229-v1:0",
+                    body=body,
+                    contentType="application/json",
+                    accept="application/json"
+                )
+                
+                end_time = time.time()
+                logger.info(f"⏱️ API call completed in {end_time - start_time:.2f} seconds")
+                
+                response_body = json.loads(response['body'].read())
+                
+                if 'content' in response_body and len(response_body['content']) > 0:
+                    return response_body['content'][0]['text']
+                else:
+                    logger.warning("⚠️ Empty response from Claude")
+                    return None
+                    
+            except ReadTimeoutError as e:
+                logger.warning(f"⏰ Timeout error on attempt {attempt + 1}: {e}")
+                if attempt < self.max_retries - 1:
+                    wait_time = self.analysis_config['retry_delay'] * (attempt + 1)
+                    logger.info(f"⏳ Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error("❌ All retry attempts failed due to timeout")
+                    return None
+                    
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                logger.error(f"🚨 AWS Client error: {error_code} - {e}")
+                
+                if error_code in ['ThrottlingException', 'ServiceUnavailable']:
+                    if attempt < self.max_retries - 1:
+                        wait_time = self.analysis_config['retry_delay'] * (2 ** attempt)
+                        logger.info(f"⏳ Exponential backoff: waiting {wait_time} seconds...")
+                        time.sleep(wait_time)
+                        continue
+                return None
+                
+            except Exception as e:
+                logger.error(f"🚨 Unexpected error: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.analysis_config['retry_delay'])
+                    continue
+                else:
+                    return None
         
+        return None
+    
+    def load_data(self, file_path):
+        """Load and validate safety inspection data"""
+        try:
+            self.df = pd.read_csv(file_path)
+            print(f"✅ Data loaded successfully! Shape: {self.df.shape}")
+            
+            # Convert INSPECTION_DATE to datetime
+            if 'INSPECTION_DATE' in self.df.columns:
+                self.df['INSPECTION_DATE'] = pd.to_datetime(self.df['INSPECTION_DATE'], errors='coerce')
+                print(f"📅 Date range: {self.df['INSPECTION_DATE'].min()} to {self.df['INSPECTION_DATE'].max()}")
+            
+            # Validate expected columns
+            expected_cols = ['INSPECTION_DATE', 'AUTHOR_NAME', 'PREPARED_BY', 'SITE_NAME', 
+                           'FACILITY_AREA', 'TEMPLATE_NAME', 'QUESTION_LABEL', 'RESPONSE', 'COMMENT']
+            
+            missing_cols = [col for col in expected_cols if col not in self.df.columns]
+            if missing_cols:
+                print(f"⚠️ Missing expected columns: {missing_cols}")
+            
+            available_cols = [col for col in expected_cols if col in self.df.columns]
+            print(f"✅ Available columns: {available_cols}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error loading data: {e}")
+            return False
+    
+    def create_chunk_prompt(self, chunk_df, chunk_num, total_chunks):
+        """Create analysis prompt for a specific chunk"""
+        sample_comments = []
+        for idx, row in chunk_df.iterrows():
+            comment_data = {
+                'comment': str(row['COMMENT'])[:400],
+                'response': row.get('RESPONSE', 'Unknown'),
+                'site': row.get('SITE_NAME', 'Unknown'),
+                'facility': row.get('FACILITY_AREA', 'Unknown'),
+                'date': row.get('INSPECTION_DATE', 'Unknown')
+            }
+            sample_comments.append(comment_data)
+        
+        prompt = f"""
+You are analyzing safety inspection comments from offshore drilling operations.
+
+CHUNK INFORMATION:
+- Chunk {chunk_num} of {total_chunks}
+- Comments in this chunk: {len(chunk_df)}
+- Analysis focus: Extract key themes, issues, and observations
+
+COMMENTS TO ANALYZE:
+"""
+        
+        for i, comment_data in enumerate(sample_comments, 1):
+            prompt += f"""
+{i}. Response: {comment_data['response']} | Site: {comment_data['site']} | Area: {comment_data['facility']}
+   Comment: "{comment_data['comment']}"
+"""
+        
+        prompt += f"""
+
+ANALYSIS REQUEST (for this chunk only):
+1. **Key Themes** - Identify 3-5 main themes in these comments
+2. **Safety Issues** - List specific safety concerns mentioned
+3. **Positive Observations** - Note good practices or compliance
+4. **Common Keywords** - Extract frequently mentioned terms
+5. **Risk Categories** - Categorize the types of risks mentioned
+
+RESPONSE FORMAT:
+- Be concise and specific
+- Use bullet points
+- Include brief quote examples
+- Focus on actionable insights
+
+Please analyze this chunk and provide insights that can be combined with other chunks.
+"""
+        
+        return prompt
+    
+    def analyze_comments_in_chunks(self, chunk_size=None):
+        """Analyze comments in chunks to avoid timeouts"""
+        if chunk_size is None:
+            chunk_size = self.analysis_config['chunk_size']
+        
+        print(f"🔄 Processing comments in chunks of {chunk_size}...")
+        
+        # Get clean comments
+        comments_df = self.df[self.df['COMMENT'].notna() & (self.df['COMMENT'] != '')].copy()
+        total_comments = len(comments_df)
+        
+        print(f"📊 Total comments to analyze: {total_comments}")
+        
+        if total_comments == 0:
+            print("❌ No comments found for analysis")
+            return None
+        
+        # Split into chunks
+        chunks = []
+        for i in range(0, len(comments_df), chunk_size):
+            chunk = comments_df.iloc[i:i+chunk_size]
+            chunks.append(chunk)
+        
+        print(f"📦 Created {len(chunks)} chunks")
+        
+        # Analyze each chunk
+        chunk_results = []
+        
+        for i, chunk in enumerate(chunks):
+            print(f"\n🔍 Processing chunk {i+1}/{len(chunks)} ({len(chunk)} comments)...")
+            
+            # Create chunk-specific prompt
+            chunk_prompt = self.create_chunk_prompt(chunk, i+1, len(chunks))
+            
+            # Make API call for this chunk
+            result = self.make_robust_api_call(chunk_prompt, max_tokens=3000)
+            
+            if result:
+                chunk_results.append({
+                    'chunk_id': i+1,
+                    'comment_count': len(chunk),
+                    'analysis': result,
+                    'status': 'success'
+                })
+                print(f"✅ Chunk {i+1} analysis completed")
+                
+                # Save partial result
+                self.save_partial_result(chunk_results[-1], i+1)
+                
+            else:
+                print(f"❌ Chunk {i+1} analysis failed")
+                chunk_results.append({
+                    'chunk_id': i+1,
+                    'comment_count': len(chunk),
+                    'analysis': None,
+                    'status': 'failed'
+                })
+            
+            # Brief pause between chunks
+            if i < len(chunks) - 1:
+                time.sleep(2)
+        
+        # Combine results
+        return self.combine_chunk_results(chunk_results, total_comments)
+    
+    def save_partial_result(self, result, chunk_id):
+        """Save partial result to file"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"chunk_analysis_{chunk_id}_{timestamp}.txt"
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(f"CHUNK {chunk_id} ANALYSIS RESULT\n")
+            f.write("="*50 + "\n")
+            f.write(f"Comments analyzed: {result['comment_count']}\n")
+            f.write(f"Status: {result['status']}\n")
+            f.write(f"Timestamp: {datetime.now()}\n")
+            f.write("="*50 + "\n\n")
+            
+            if result['analysis']:
+                f.write(result['analysis'])
+            else:
+                f.write("Analysis failed for this chunk.")
+        
+        print(f"💾 Partial result saved: {filename}")
+    
+    def combine_chunk_results(self, chunk_results, total_comments):
+        """Combine analysis results from all chunks"""
+        print(f"\n🔄 Combining results from {len(chunk_results)} chunks...")
+        
+        successful_chunks = [r for r in chunk_results if r['status'] == 'success']
+        failed_chunks = [r for r in chunk_results if r['status'] == 'failed']
+        
+        print(f"✅ Successful chunks: {len(successful_chunks)}")
+        print(f"❌ Failed chunks: {len(failed_chunks)}")
+        
+        if not successful_chunks:
+            print("❌ No successful chunk analysis. Creating fallback analysis...")
+            return self.create_fallback_analysis(total_comments)
+        
+        # Create summary prompt
+        summary_prompt = f"""
+You are combining analysis results from {len(successful_chunks)} chunks of safety inspection comments.
+
+CHUNK RESULTS TO COMBINE:
+"""
+        
+        for i, result in enumerate(successful_chunks, 1):
+            summary_prompt += f"""
+CHUNK {result['chunk_id']} ({result['comment_count']} comments):
+{result['analysis']}
+
+---
+"""
+        
+        summary_prompt += f"""
+
+FINAL SYNTHESIS REQUEST:
+Please combine these chunk analyses into a comprehensive summary with:
+
+1. **OVERALL THEMES** - Top 5-7 themes across all chunks
+2. **COMMON SAFETY ISSUES** - Most frequently mentioned problems
+3. **POSITIVE OBSERVATIONS** - Good practices identified
+4. **IMPROVEMENT OPPORTUNITIES** - Areas needing attention
+5. **RISK ASSESSMENT** - Overall risk categories and severity
+6. **EXECUTIVE SUMMARY** - Key findings and recommendations
+
+Total comments analyzed: {sum(r['comment_count'] for r in successful_chunks)}
+Success rate: {len(successful_chunks)}/{len(chunk_results)} chunks
+
+Please provide a cohesive, actionable analysis suitable for executive reporting.
+"""
+        
+        # Make final API call to combine results
+        print("🔄 Making final API call to combine chunk results...")
+        combined_result = self.make_robust_api_call(summary_prompt, max_tokens=4000)
+        
+        if combined_result:
+            final_result = {
+                'total_comments': total_comments,
+                'successful_chunks': len(successful_chunks),
+                'failed_chunks': len(failed_chunks),
+                'analysis': combined_result,
+                'chunk_details': chunk_results
+            }
+            
+            self.claude_analysis = final_result
+            self.save_final_analysis(final_result)
+            return final_result
+        else:
+            print("❌ Final combination failed. Using best available chunk result...")
+            return self.create_best_available_analysis(successful_chunks, total_comments)
+    
+    def create_fallback_analysis(self, total_comments):
+        """Create fallback analysis when API calls fail"""
+        fallback_content = f"""
+**FALLBACK ANALYSIS REPORT**
+
+Due to API connectivity issues, automated analysis could not be completed.
+However, here are recommended manual analysis steps:
+
+**MANUAL ANALYSIS RECOMMENDATIONS:**
+
+1. **Text Mining Approach**:
+   - Search for common keywords: "equipment", "training", "procedure", "safety"
+   - Count frequency of terms like "effective", "ineffective", "issue", "concern"
+
+2. **Categorization Strategy**:
+   - Group comments by response type (Effective vs Ineffective)
+   - Sort by site and facility area
+   - Look for patterns in dates/timeframes
+
+3. **Key Areas to Investigate**:
+   - Equipment-related comments
+   - Training and competency issues
+   - Procedural compliance
+   - Communication effectiveness
+
+4. **Statistical Analysis**:
+   - Calculate percentage of positive vs negative comments
+   - Identify most active sites/facilities
+   - Track trends over time
+
+**NEXT STEPS:**
+- Review individual comment files saved during processing
+- Consider reducing batch size and retrying
+- Use alternative analysis tools if needed
+
+Total comments requiring analysis: {total_comments}
+"""
+        
+        return {
+            'total_comments': total_comments,
+            'analysis': fallback_content,
+            'status': 'fallback',
+            'timestamp': datetime.now()
+        }
+    
+    def save_final_analysis(self, result):
+        """Save final combined analysis to file"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"safety_comment_analysis_final_{timestamp}.txt"
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("="*80 + "\n")
+            f.write("CLAUDE SAFETY INSPECTION COMMENT ANALYSIS - FINAL REPORT\n")
+            f.write("="*80 + "\n")
+            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total comments analyzed: {result['total_comments']}\n")
+            f.write(f"Successful chunks: {result['successful_chunks']}\n")
+            f.write(f"Failed chunks: {result['failed_chunks']}\n")
+            f.write(f"Success rate: {(result['successful_chunks']/(result['successful_chunks']+result['failed_chunks']))*100:.1f}%\n")
+            f.write("="*80 + "\n\n")
+            f.write(result['analysis'])
+        
+        print(f"📄 Final analysis saved: {filename}")
+    
+    def create_best_available_analysis(self, successful_chunks, total_comments):
+        """Create analysis from best available chunk when combination fails"""
+        if not successful_chunks:
+            return self.create_fallback_analysis(total_comments)
+        
+        best_chunk = max(successful_chunks, key=lambda x: x['comment_count'])
+        
+        analysis_content = f"""
+**PARTIAL ANALYSIS REPORT (BEST AVAILABLE)**
+
+Note: This analysis is based on the most complete chunk due to API limitations.
+
+**CHUNK DETAILS:**
+- Chunk ID: {best_chunk['chunk_id']}
+- Comments analyzed: {best_chunk['comment_count']} out of {total_comments} total
+- Representation: {(best_chunk['comment_count']/total_comments)*100:.1f}% of total comments
+
+**ANALYSIS RESULTS:**
+{best_chunk['analysis']}
+
+**LIMITATIONS:**
+- This represents only a portion of your complete dataset
+- For full analysis, consider running smaller batches
+- Some patterns may not be visible in this subset
+
+**RECOMMENDATIONS:**
+- Review all chunk files for additional insights
+- Consider manual review of remaining comments
+- Retry analysis with smaller chunk sizes if needed
+"""
+        
+        return {
+            'total_comments': total_comments,
+            'analyzed_comments': best_chunk['comment_count'],
+            'analysis': analysis_content,
+            'status': 'partial',
+            'timestamp': datetime.now()
+        }
+    
+    # HTML Report Generation Methods
     def matplotlib_to_base64(self, fig):
         """Convert matplotlib figure to base64 string"""
         buffer = io.BytesIO()
@@ -64,26 +540,23 @@ class SafetyAnalysisHTMLReportGenerator:
         return pio.to_html(fig, include_plotlyjs='cdn', div_id=f'plotly-div-{self.chart_counter}')
     
     def create_executive_summary_section(self):
-        """Create executive summary section"""
-        
-        # Calculate key metrics
+        """Create executive summary section for HTML report"""
         total_records = len(self.df)
         date_range = f"{self.df['INSPECTION_DATE'].min().strftime('%Y-%m-%d')} to {self.df['INSPECTION_DATE'].max().strftime('%Y-%m-%d')}"
         unique_sites = self.df['SITE_NAME'].nunique() if 'SITE_NAME' in self.df.columns else 0
         unique_facilities = self.df['FACILITY_AREA'].nunique() if 'FACILITY_AREA' in self.df.columns else 0
         
         # Response distribution
-        response_dist = self.df['RESPONSE'].value_counts() if 'RESPONSE' in self.df.columns else pd.Series()
-        
-        # Calculate effectiveness rate
         if 'RESPONSE' in self.df.columns:
             effective_count = self.df[self.df['RESPONSE'] == 'Effective'].shape[0]
             effectiveness_rate = (effective_count / total_records) * 100
         else:
             effectiveness_rate = 0
         
-        # Comment availability
         comment_availability = (self.df['COMMENT'].notna().sum() / total_records) * 100
+        
+        # AI analysis status
+        ai_status = "✅ Completed" if self.claude_analysis and 'analysis' in self.claude_analysis else "❌ Not Available"
         
         summary_html = f"""
         <div class="row mb-4">
@@ -104,6 +577,7 @@ class SafetyAnalysisHTMLReportGenerator:
                                     <li><strong>Unique Sites:</strong> {unique_sites}</li>
                                     <li><strong>Unique Facility Areas:</strong> {unique_facilities}</li>
                                     <li><strong>Comment Availability:</strong> {comment_availability:.1f}%</li>
+                                    <li><strong>AI Analysis Status:</strong> {ai_status}</li>
                                 </ul>
                             </div>
                             <div class="col-md-6">
@@ -117,7 +591,7 @@ class SafetyAnalysisHTMLReportGenerator:
                                     </div>
                                     <div class="col-6">
                                         <div class="text-center p-3 bg-light rounded">
-                                            <h4 class="text-info">{len(response_dist)}</h4>
+                                            <h4 class="text-info">{len(self.df['RESPONSE'].unique()) if 'RESPONSE' in self.df.columns else 0}</h4>
                                             <small>Response Types</small>
                                         </div>
                                     </div>
@@ -132,298 +606,62 @@ class SafetyAnalysisHTMLReportGenerator:
         
         return summary_html
     
-    def create_data_quality_section(self):
-        """Create data quality assessment section"""
-        
-        # Missing data analysis
-        missing_data = self.df.isnull().sum()
-        missing_pct = (missing_data / len(self.df)) * 100
-        
-        # Create missing data visualization
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-        
-        # Missing data bar chart
-        missing_data_plot = missing_data[missing_data > 0]
-        if len(missing_data_plot) > 0:
-            bars = ax1.bar(range(len(missing_data_plot)), missing_data_plot.values, 
-                          color=self.colors['warning'], alpha=0.8)
-            ax1.set_title('Missing Data by Column', fontweight='bold')
-            ax1.set_xlabel('Columns')
-            ax1.set_ylabel('Missing Count')
-            ax1.set_xticks(range(len(missing_data_plot)))
-            ax1.set_xticklabels(missing_data_plot.index, rotation=45, ha='right')
-            
-            # Add value labels
-            for bar, value in zip(bars, missing_data_plot.values):
-                height = bar.get_height()
-                ax1.text(bar.get_x() + bar.get_width()/2., height,
-                        f'{value}', ha='center', va='bottom')
-        else:
-            ax1.text(0.5, 0.5, 'No Missing Data!', ha='center', va='center',
-                    transform=ax1.transAxes, fontsize=16, color='green', weight='bold')
-            ax1.set_title('Data Completeness Status', fontweight='bold')
-        
-        # Data completeness pie chart
-        total_cells = len(self.df) * len(self.df.columns)
-        missing_cells = missing_data.sum()
-        complete_cells = total_cells - missing_cells
-        
-        sizes = [complete_cells, missing_cells]
-        labels = ['Complete Data', 'Missing Data']
-        colors = [self.colors['success'], self.colors['danger']]
-        
-        ax2.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%', startangle=90)
-        ax2.set_title('Overall Data Quality', fontweight='bold')
-        
-        plt.tight_layout()
-        data_quality_img = self.matplotlib_to_base64(fig)
-        
-        # Create data quality table
-        quality_table_html = """
-        <div class="table-responsive">
-            <table class="table table-striped table-hover">
-                <thead class="table-dark">
-                    <tr>
-                        <th>Column</th>
-                        <th>Total Records</th>
-                        <th>Missing</th>
-                        <th>Missing %</th>
-                        <th>Data Type</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-        """
-        
-        for col in self.df.columns:
-            missing_count = missing_data[col]
-            missing_percentage = missing_pct[col]
-            data_type = str(self.df[col].dtype)
-            
-            if missing_percentage == 0:
-                status = '<span class="badge bg-success">Complete</span>'
-            elif missing_percentage < 10:
-                status = '<span class="badge bg-warning">Good</span>'
-            elif missing_percentage < 30:
-                status = '<span class="badge bg-warning">Moderate</span>'
-            else:
-                status = '<span class="badge bg-danger">Poor</span>'
-            
-            quality_table_html += f"""
-                <tr>
-                    <td><strong>{col}</strong></td>
-                    <td>{len(self.df):,}</td>
-                    <td>{missing_count}</td>
-                    <td>{missing_percentage:.1f}%</td>
-                    <td><code>{data_type}</code></td>
-                    <td>{status}</td>
-                </tr>
-            """
-        
-        quality_table_html += """
-                </tbody>
-            </table>
-        </div>
-        """
-        
-        data_quality_html = f"""
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card border-info">
-                    <div class="card-header bg-info text-white">
-                        <h3 class="card-title mb-0">
-                            <i class="fas fa-check-circle"></i> Data Quality Assessment
-                        </h3>
-                    </div>
-                    <div class="card-body">
-                        <div class="row mb-4">
-                            <div class="col-12">
-                                <img src="{data_quality_img}" class="img-fluid" alt="Data Quality Charts">
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-12">
-                                <h5 class="text-info mb-3">Detailed Data Quality Metrics</h5>
-                                {quality_table_html}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        """
-        
-        return data_quality_html
-    
-    def create_response_analysis_section(self):
-        """Create response pattern analysis section"""
-        
-        if 'RESPONSE' not in self.df.columns:
-            return '<div class="alert alert-warning">Response column not available for analysis.</div>'
-        
-        # Response distribution
-        response_counts = self.df['RESPONSE'].value_counts()
-        response_pct = self.df['RESPONSE'].value_counts(normalize=True) * 100
-        
-        # Create interactive plotly charts
-        fig = make_subplots(
-            rows=2, cols=2,
-            subplot_titles=('Response Distribution', 'Response by Site', 
-                           'Response Timeline', 'Response by Facility Area'),
-            specs=[[{"type": "pie"}, {"type": "bar"}],
-                   [{"type": "scatter"}, {"type": "bar"}]]
-        )
-        
-        # 1. Response distribution pie chart
-        fig.add_trace(
-            go.Pie(labels=response_counts.index, values=response_counts.values,
-                   name="Response Distribution"),
-            row=1, col=1
-        )
-        
-        # 2. Response by site
-        if 'SITE_NAME' in self.df.columns:
-            site_response = pd.crosstab(self.df['SITE_NAME'], self.df['RESPONSE'])
-            for response_type in site_response.columns:
-                fig.add_trace(
-                    go.Bar(name=response_type, x=site_response.index, 
-                           y=site_response[response_type]),
-                    row=1, col=2
-                )
-        
-        # 3. Response timeline
-        if 'INSPECTION_DATE' in self.df.columns:
-            timeline_data = self.df.groupby([self.df['INSPECTION_DATE'].dt.date, 'RESPONSE']).size().reset_index(name='count')
-            for response_type in timeline_data['RESPONSE'].unique():
-                subset = timeline_data[timeline_data['RESPONSE'] == response_type]
-                fig.add_trace(
-                    go.Scatter(x=subset['INSPECTION_DATE'], y=subset['count'],
-                              mode='lines+markers', name=response_type),
-                    row=2, col=1
-                )
-        
-        # 4. Response by facility area
-        if 'FACILITY_AREA' in self.df.columns:
-            facility_response = pd.crosstab(self.df['FACILITY_AREA'], self.df['RESPONSE'])
-            facility_top = facility_response.sum(axis=1).nlargest(10)
-            facility_response_top = facility_response.loc[facility_top.index]
-            
-            for response_type in facility_response_top.columns:
-                fig.add_trace(
-                    go.Bar(name=response_type, x=facility_response_top.index, 
-                           y=facility_response_top[response_type]),
-                    row=2, col=2
-                )
-        
-        fig.update_layout(height=800, showlegend=True, title_text="Response Pattern Analysis")
-        response_charts_html = self.plotly_to_html(fig)
-        self.chart_counter += 1
-        
-        # Response summary table
-        response_table_html = """
-        <div class="table-responsive">
-            <table class="table table-striped">
-                <thead class="table-dark">
-                    <tr>
-                        <th>Response Type</th>
-                        <th>Count</th>
-                        <th>Percentage</th>
-                        <th>Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-        """
-        
-        for response, count in response_counts.items():
-            percentage = response_pct[response]
-            
-            if response == 'Effective':
-                status = '<span class="badge bg-success">Positive</span>'
-            elif response == 'Ineffective':
-                status = '<span class="badge bg-danger">Needs Attention</span>'
-            else:
-                status = '<span class="badge bg-secondary">Other</span>'
-            
-            response_table_html += f"""
-                <tr>
-                    <td><strong>{response}</strong></td>
-                    <td>{count:,}</td>
-                    <td>{percentage:.1f}%</td>
-                    <td>{status}</td>
-                </tr>
-            """
-        
-        response_table_html += """
-                </tbody>
-            </table>
-        </div>
-        """
-        
-        response_html = f"""
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card border-success">
-                    <div class="card-header bg-success text-white">
-                        <h3 class="card-title mb-0">
-                            <i class="fas fa-chart-bar"></i> Response Pattern Analysis
-                        </h3>
-                    </div>
-                    <div class="card-body">
-                        <div class="row mb-4">
-                            <div class="col-md-6">
-                                {response_table_html}
-                            </div>
-                            <div class="col-md-6">
-                                <div class="alert alert-info">
-                                    <h6 class="alert-heading">Key Insights</h6>
-                                    <ul class="mb-0">
-                                        <li>Total responses analyzed: {len(self.df):,}</li>
-                                        <li>Most common response: {response_counts.index[0]} ({response_pct.iloc[0]:.1f}%)</li>
-                                        <li>Response types identified: {len(response_counts)}</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-12">
-                                {response_charts_html}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        """
-        
-        return response_html
-    
     def create_claude_analysis_section(self):
-        """Create Claude analysis results section"""
-        
-        if not self.claude_analysis:
+        """Create Claude analysis results section for HTML report"""
+        if not self.claude_analysis or 'analysis' not in self.claude_analysis:
             return f"""
             <div class="row mb-4">
                 <div class="col-12">
                     <div class="alert alert-warning">
                         <h5 class="alert-heading">
-                            <i class="fas fa-robot"></i> AI Analysis Not Available
+                            <i class="fas fa-robot"></i> AI Analysis Status
                         </h5>
-                        <p>Claude AI analysis was not provided or failed to complete. The report includes statistical analysis only.</p>
+                        <p>Claude AI analysis was not available or failed to complete. This could be due to:</p>
+                        <ul>
+                            <li>API timeout or connectivity issues</li>
+                            <li>Large dataset requiring chunked processing</li>
+                            <li>AWS Bedrock access configuration</li>
+                        </ul>
                         <hr>
-                        <p class="mb-0">To get AI-powered insights, run the Claude analysis component and regenerate this report.</p>
+                        <p class="mb-0">The report includes comprehensive statistical analysis. Consider running the analysis again with smaller chunk sizes for AI insights.</p>
                     </div>
                 </div>
             </div>
             """
         
-        # Extract Claude analysis content
-        if isinstance(self.claude_analysis, dict):
-            analysis_content = self.claude_analysis.get('analysis', 'No analysis content available')
-        else:
-            analysis_content = str(self.claude_analysis)
+        # Format Claude analysis content
+        analysis_content = self.claude_analysis['analysis']
+        formatted_html = self.format_claude_analysis(analysis_content)
         
-        # Process the analysis content to create structured HTML
-        analysis_html = self.format_claude_analysis(analysis_content)
+        # Add analysis metadata
+        metadata_html = ""
+        if 'successful_chunks' in self.claude_analysis:
+            total_chunks = self.claude_analysis['successful_chunks'] + self.claude_analysis['failed_chunks']
+            success_rate = (self.claude_analysis['successful_chunks'] / total_chunks) * 100
+            
+            metadata_html = f"""
+            <div class="alert alert-info mb-3">
+                <h6 class="alert-heading">Analysis Metadata</h6>
+                <div class="row">
+                    <div class="col-md-3">
+                        <strong>Comments Analyzed:</strong><br>
+                        {self.claude_analysis['total_comments']:,}
+                    </div>
+                    <div class="col-md-3">
+                        <strong>Processing Chunks:</strong><br>
+                        {self.claude_analysis['successful_chunks']}/{total_chunks}
+                    </div>
+                    <div class="col-md-3">
+                        <strong>Success Rate:</strong><br>
+                        {success_rate:.1f}%
+                    </div>
+                    <div class="col-md-3">
+                        <strong>Analysis Status:</strong><br>
+                        {'Complete' if success_rate > 80 else 'Partial'}
+                    </div>
+                </div>
+            </div>
+            """
         
         claude_section = f"""
         <div class="row mb-4">
@@ -435,7 +673,8 @@ class SafetyAnalysisHTMLReportGenerator:
                         </h3>
                     </div>
                     <div class="card-body">
-                        {analysis_html}
+                        {metadata_html}
+                        {formatted_html}
                     </div>
                 </div>
             </div>
@@ -446,20 +685,16 @@ class SafetyAnalysisHTMLReportGenerator:
     
     def format_claude_analysis(self, analysis_content):
         """Format Claude analysis content into structured HTML"""
-        
-        # Split content into sections
         lines = analysis_content.split('\n')
         formatted_html = ""
-        current_section = ""
         in_list = False
         
         for line in lines:
             line = line.strip()
-            
             if not line:
                 continue
             
-            # Check for headers (lines with ** or numbered sections)
+            # Check for headers
             if line.startswith('**') and line.endswith('**'):
                 if in_list:
                     formatted_html += "</ul>\n"
@@ -479,7 +714,6 @@ class SafetyAnalysisHTMLReportGenerator:
                     in_list = True
                 list_item = line.replace('-', '').replace('•', '').strip()
                 
-                # Check if line contains quotes (exact examples)
                 if '"' in list_item:
                     formatted_html += f'<li class="list-group-item"><i class="fas fa-quote-left text-muted"></i> {list_item}</li>\n'
                 else:
@@ -490,7 +724,6 @@ class SafetyAnalysisHTMLReportGenerator:
                     formatted_html += "</ul>\n"
                     in_list = False
                 
-                # Check if line contains quotes (exact examples)
                 if '"' in line:
                     formatted_html += f'<div class="alert alert-light border-left-primary"><i class="fas fa-quote-left text-muted"></i> {line}</div>\n'
                 else:
@@ -501,791 +734,18 @@ class SafetyAnalysisHTMLReportGenerator:
         
         return formatted_html
     
-    def create_site_facility_section(self):
-        """Create site and facility analysis section"""
+    def create_response_analysis_section(self):
+        """Create response pattern analysis section"""
+        if 'RESPONSE' not in self.df.columns:
+            return '<div class="alert alert-warning">Response column not available for analysis.</div>'
         
-        # Site analysis
-        site_analysis_html = ""
-        if 'SITE_NAME' in self.df.columns:
-            site_stats = self.df['SITE_NAME'].value_counts()
-            
-            # Create site distribution chart
-            fig_site = px.bar(
-                x=site_stats.index, 
-                y=site_stats.values,
-                title="Inspection Activity by Site",
-                labels={'x': 'Site Name', 'y': 'Number of Inspections'},
-                color=site_stats.values,
-                color_continuous_scale='Blues'
-            )
-            fig_site.update_layout(height=400, showlegend=False)
-            site_chart_html = self.plotly_to_html(fig_site)
-            self.chart_counter += 1
-            
-            site_analysis_html = f"""
-            <div class="row mb-4">
-                <div class="col-md-6">
-                    <h5 class="text-primary">Site Activity Summary</h5>
-                    <div class="table-responsive">
-                        <table class="table table-sm table-striped">
-                            <thead class="table-dark">
-                                <tr><th>Site</th><th>Inspections</th><th>Percentage</th></tr>
-                            </thead>
-                            <tbody>
-            """
-            
-            for site, count in site_stats.head(10).items():
-                percentage = (count / len(self.df)) * 100
-                site_analysis_html += f"""
-                    <tr>
-                        <td><strong>{site}</strong></td>
-                        <td>{count:,}</td>
-                        <td>{percentage:.1f}%</td>
-                    </tr>
-                """
-            
-            site_analysis_html += f"""
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-                <div class="col-md-6">
-                    {site_chart_html}
-                </div>
-            </div>
-            """
+        response_counts = self.df['RESPONSE'].value_counts()
         
-        # Facility analysis
-        facility_analysis_html = ""
-        if 'FACILITY_AREA' in self.df.columns:
-            facility_stats = self.df['FACILITY_AREA'].value_counts()
-            
-            # Create facility distribution chart
-            fig_facility = px.pie(
-                values=facility_stats.values[:10], 
-                names=facility_stats.index[:10],
-                title="Top 10 Facility Areas by Inspection Volume"
-            )
-            fig_facility.update_layout(height=400)
-            facility_chart_html = self.plotly_to_html(fig_facility)
-            self.chart_counter += 1
-            
-            facility_analysis_html = f"""
-            <div class="row mb-4">
-                <div class="col-md-6">
-                    {facility_chart_html}
-                </div>
-                <div class="col-md-6">
-                    <h5 class="text-primary">Facility Area Summary</h5>
-                    <div class="table-responsive">
-                        <table class="table table-sm table-striped">
-                            <thead class="table-dark">
-                                <tr><th>Facility Area</th><th>Inspections</th><th>Percentage</th></tr>
-                            </thead>
-                            <tbody>
-            """
-            
-            for facility, count in facility_stats.head(10).items():
-                percentage = (count / len(self.df)) * 100
-                facility_analysis_html += f"""
-                    <tr>
-                        <td><strong>{facility}</strong></td>
-                        <td>{count:,}</td>
-                        <td>{percentage:.1f}%</td>
-                    </tr>
-                """
-            
-            facility_analysis_html += """
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-            """
-        
-        site_facility_html = f"""
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card border-secondary">
-                    <div class="card-header bg-secondary text-white">
-                        <h3 class="card-title mb-0">
-                            <i class="fas fa-map-marker-alt"></i> Site & Facility Analysis
-                        </h3>
-                    </div>
-                    <div class="card-body">
-                        {site_analysis_html}
-                        {facility_analysis_html}
-                    </div>
-                </div>
-            </div>
-        </div>
-        """
-        
-        return site_facility_html
-    
-    def create_timeline_section(self):
-        """Create inspection timeline analysis section"""
-        
-        if 'INSPECTION_DATE' not in self.df.columns:
-            return '<div class="alert alert-warning">Date column not available for timeline analysis.</div>'
-        
-        # Prepare date data
-        date_data = self.df['INSPECTION_DATE'].dropna()
-        
-        if len(date_data) == 0:
-            return '<div class="alert alert-warning">No valid dates found for timeline analysis.</div>'
-        
-        # Monthly timeline
-        monthly_counts = date_data.dt.to_period('M').value_counts().sort_index()
-        
-        # Create timeline chart
-        fig_timeline = go.Figure()
-        
-        fig_timeline.add_trace(go.Scatter(
-            x=monthly_counts.index.to_timestamp(),
-            y=monthly_counts.values,
-            mode='lines+markers',
-            name='Monthly Inspections',
-            line=dict(color=self.colors['primary'], width=3),
-            marker=dict(size=8)
-        ))
-        
-        fig_timeline.update_layout(
-            title='Inspection Activity Timeline',
-            xaxis_title='Month',
-            yaxis_title='Number of Inspections',
-            height=400,
-            hovermode='x unified'
+        # Create interactive charts
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Response Distribution', 'Response by Site', 
+                           'Response Timeline', 'Response by Facility Area'),
+            specs=[[{"type": "pie"}, {"type": "bar"}],
+                   [{"type": "scatter"}, {"type": "bar"}]]
         )
-        
-        timeline_chart_html = self.plotly_to_html(fig_timeline)
-        self.chart_counter += 1
-        
-        # Day of week analysis
-        daily_counts = date_data.dt.day_name().value_counts()
-        day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-        daily_counts = daily_counts.reindex([day for day in day_order if day in daily_counts.index])
-        
-        fig_daily = px.bar(
-            x=daily_counts.index,
-            y=daily_counts.values,
-            title='Inspection Activity by Day of Week',
-            labels={'x': 'Day of Week', 'y': 'Number of Inspections'},
-            color=daily_counts.values,
-            color_continuous_scale='Viridis'
-        )
-        fig_daily.update_layout(height=400, showlegend=False)
-        daily_chart_html = self.plotly_to_html(fig_daily)
-        self.chart_counter += 1
-        
-        timeline_html = f"""
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card border-info">
-                    <div class="card-header bg-info text-white">
-                        <h3 class="card-title mb-0">
-                            <i class="fas fa-calendar-alt"></i> Inspection Timeline Analysis
-                        </h3>
-                    </div>
-                    <div class="card-body">
-                        <div class="row mb-4">
-                            <div class="col-12">
-                                {timeline_chart_html}
-                            </div>
-                        </div>
-                        <div class="row">
-                            <div class="col-12">
-                                {daily_chart_html}
-                            </div>
-                        </div>
-                        <div class="row mt-4">
-                            <div class="col-md-6">
-                                <div class="alert alert-info">
-                                    <h6 class="alert-heading">Timeline Insights</h6>
-                                    <ul class="mb-0">
-                                        <li>Date range: {date_data.min().strftime('%Y-%m-%d')} to {date_data.max().strftime('%Y-%m-%d')}</li>
-                                        <li>Peak month: {monthly_counts.idxmax().strftime('%Y-%m')} ({monthly_counts.max()} inspections)</li>
-                                        <li>Most active day: {daily_counts.idxmax()} ({daily_counts.max()} inspections)</li>
-                                    </ul>
-                                </div>
-                            </div>
-                            <div class="col-md-6">
-                                <div class="alert alert-secondary">
-                                    <h6 class="alert-heading">Activity Statistics</h6>
-                                    <ul class="mb-0">
-                                        <li>Average per month: {monthly_counts.mean():.1f} inspections</li>
-                                        <li>Total months covered: {len(monthly_counts)}</li>
-                                        <li>Active days per week: {len(daily_counts)}</li>
-                                    </ul>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        """
-        
-        return timeline_html
-    
-    def create_recommendations_section(self):
-        """Create recommendations and next steps section"""
-        
-        # Calculate metrics for recommendations
-        total_records = len(self.df)
-        effectiveness_rate = 0
-        comment_rate = 0
-        
-        if 'RESPONSE' in self.df.columns:
-            effective_count = self.df[self.df['RESPONSE'] == 'Effective'].shape[0]
-            effectiveness_rate = (effective_count / total_records) * 100
-        
-        if 'COMMENT' in self.df.columns:
-            comment_count = self.df['COMMENT'].notna().sum()
-            comment_rate = (comment_count / total_records) * 100
-        
-        # Generate recommendations based on data
-        recommendations = []
-        
-        if effectiveness_rate < 70:
-            recommendations.append({
-                'type': 'warning',
-                'title': 'Effectiveness Rate Below Target',
-                'description': f'Current effectiveness rate is {effectiveness_rate:.1f}%. Consider reviewing inspection procedures and training.',
-                'action': 'Implement targeted training programs and review inspection protocols.'
-            })
-        else:
-            recommendations.append({
-                'type': 'success',
-                'title': 'Good Effectiveness Rate',
-                'description': f'Effectiveness rate of {effectiveness_rate:.1f}% indicates strong safety practices.',
-                'action': 'Maintain current standards and share best practices across sites.'
-            })
-        
-        if comment_rate < 80:
-            recommendations.append({
-                'type': 'info',
-                'title': 'Improve Comment Documentation',
-                'description': f'Only {comment_rate:.1f}% of inspections have detailed comments.',
-                'action': 'Encourage inspectors to provide more detailed observations and findings.'
-            })
-        
-        # Site-specific recommendations
-        if 'SITE_NAME' in self.df.columns:
-            site_response_analysis = pd.crosstab(self.df['SITE_NAME'], self.df['RESPONSE'], normalize='index') * 100
-            if 'Ineffective' in site_response_analysis.columns:
-                problematic_sites = site_response_analysis[site_response_analysis['Ineffective'] > 30]
-                if len(problematic_sites) > 0:
-                    recommendations.append({
-                        'type': 'danger',
-                        'title': 'Sites Requiring Attention',
-                        'description': f'{len(problematic_sites)} sites have >30% ineffective responses.',
-                        'action': f'Focus improvement efforts on: {", ".join(problematic_sites.index[:3])}'
-                    })
-        
-        recommendations_html = """
-        <div class="row">
-        """
-        
-        for rec in recommendations:
-            alert_class = f"alert-{rec['type']}"
-            icon_map = {
-                'success': 'check-circle',
-                'warning': 'exclamation-triangle', 
-                'danger': 'exclamation-circle',
-                'info': 'info-circle'
-            }
-            icon = icon_map.get(rec['type'], 'info-circle')
-            
-            recommendations_html += f"""
-            <div class="col-md-6 mb-3">
-                <div class="alert {alert_class}">
-                    <h6 class="alert-heading">
-                        <i class="fas fa-{icon}"></i> {rec['title']}
-                    </h6>
-                    <p class="mb-2">{rec['description']}</p>
-                    <hr>
-                    <p class="mb-0"><strong>Recommended Action:</strong> {rec['action']}</p>
-                </div>
-            </div>
-            """
-        
-        recommendations_html += """
-        </div>
-        """
-        
-        next_steps_html = """
-        <div class="row mt-4">
-            <div class="col-12">
-                <div class="card border-dark">
-                    <div class="card-header bg-dark text-white">
-                        <h5 class="card-title mb-0">
-                            <i class="fas fa-tasks"></i> Next Steps & Action Items
-                        </h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="row">
-                            <div class="col-md-4">
-                                <h6 class="text-primary">Immediate Actions (1-30 days)</h6>
-                                <ul class="list-group list-group-flush">
-                                    <li class="list-group-item">Review ineffective inspection findings</li>
-                                    <li class="list-group-item">Conduct follow-up inspections at high-risk sites</li>
-                                    <li class="list-group-item">Update inspection documentation standards</li>
-                                </ul>
-                            </div>
-                            <div class="col-md-4">
-                                <h6 class="text-warning">Short-term Actions (1-3 months)</h6>
-                                <ul class="list-group list-group-flush">
-                                    <li class="list-group-item">Implement additional training programs</li>
-                                    <li class="list-group-item">Establish regular monitoring cycles</li>
-                                    <li class="list-group-item">Develop site-specific improvement plans</li>
-                                </ul>
-                            </div>
-                            <div class="col-md-4">
-                                <h6 class="text-success">Long-term Goals (3-12 months)</h6>
-                                <ul class="list-group list-group-flush">
-                                    <li class="list-group-item">Achieve >85% effectiveness rate</li>
-                                    <li class="list-group-item">Standardize best practices across all sites</li>
-                                    <li class="list-group-item">Implement predictive safety analytics</li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        """
-        
-        recommendations_section = f"""
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="card border-primary">
-                    <div class="card-header bg-primary text-white">
-                        <h3 class="card-title mb-0">
-                            <i class="fas fa-lightbulb"></i> Recommendations & Action Plan
-                        </h3>
-                    </div>
-                    <div class="card-body">
-                        {recommendations_html}
-                        {next_steps_html}
-                    </div>
-                </div>
-            </div>
-        </div>
-        """
-        
-        return recommendations_section
-    
-    def generate_full_html_report(self, output_file=None):
-        """Generate the complete HTML report"""
-        
-        if output_file is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_file = f"safety_inspection_report_{timestamp}.html"
-        
-        # Generate all sections
-        print("📊 Generating report sections...")
-        
-        executive_summary = self.create_executive_summary_section()
-        data_quality = self.create_data_quality_section()
-        response_analysis = self.create_response_analysis_section()
-        claude_analysis = self.create_claude_analysis_section()
-        site_facility = self.create_site_facility_section()
-        timeline = self.create_timeline_section()
-        recommendations = self.create_recommendations_section()
-        
-        # Create the complete HTML document
-        html_content = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{self.report_title}</title>
-    
-    <!-- Bootstrap CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    
-    <!-- Font Awesome -->
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    
-    <!-- Plotly.js -->
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-    
-    <!-- Custom Styles -->
-    <style>
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #f8f9fa;
-            line-height: 1.6;
-        }}
-        
-        .navbar-brand {{
-            font-weight: bold;
-            font-size: 1.5rem;
-        }}
-        
-        .card {{
-            box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
-            border: 1px solid rgba(0, 0, 0, 0.125);
-            margin-bottom: 1.5rem;
-        }}
-        
-        .card-header {{
-            border-bottom: 1px solid rgba(0, 0, 0, 0.125);
-            font-weight: 600;
-        }}
-        
-        .alert {{
-            border: 1px solid transparent;
-            border-radius: 0.375rem;
-        }}
-        
-        .table {{
-            margin-bottom: 0;
-        }}
-        
-        .badge {{
-            font-size: 0.75em;
-        }}
-        
-        .text-primary {{ color: {self.colors['primary']} !important; }}
-        .text-secondary {{ color: {self.colors['secondary']} !important; }}
-        .bg-primary {{ background-color: {self.colors['primary']} !important; }}
-        .bg-secondary {{ background-color: {self.colors['secondary']} !important; }}
-        .border-primary {{ border-color: {self.colors['primary']} !important; }}
-        .border-secondary {{ border-color: {self.colors['secondary']} !important; }}
-        
-        .report-header {{
-            background: linear-gradient(135deg, {self.colors['primary']}, {self.colors['secondary']});
-            color: white;
-            padding: 2rem 0;
-            margin-bottom: 2rem;
-        }}
-        
-        .section-divider {{
-            border-top: 2px solid {self.colors['primary']};
-            margin: 2rem 0;
-        }}
-        
-        @media print {{
-            .no-print {{ display: none !important; }}
-            .card {{ page-break-inside: avoid; }}
-        }}
-        
-        .toc {{
-            background-color: white;
-            border-radius: 0.375rem;
-            padding: 1.5rem;
-            margin-bottom: 2rem;
-        }}
-        
-        .toc a {{
-            text-decoration: none;
-            color: {self.colors['primary']};
-        }}
-        
-        .toc a:hover {{
-            text-decoration: underline;
-        }}
-    </style>
-</head>
-<body>
-    <!-- Navigation -->
-    <nav class="navbar navbar-expand-lg navbar-dark" style="background-color: {self.colors['primary']};">
-        <div class="container">
-            <a class="navbar-brand" href="#">
-                <i class="fas fa-shield-alt"></i> Safety Inspection Report
-            </a>
-            <div class="navbar-nav ms-auto">
-                <span class="navbar-text">
-                    Generated: {self.timestamp}
-                </span>
-            </div>
-        </div>
-    </nav>
-
-    <!-- Report Header -->
-    <div class="report-header">
-        <div class="container">
-            <div class="row">
-                <div class="col-12 text-center">
-                    <h1 class="display-4 mb-3">
-                        <i class="fas fa-clipboard-check"></i> {self.report_title}
-                    </h1>
-                    <p class="lead mb-0">
-                        Comprehensive Analysis of Safety Inspection Data
-                    </p>
-                    <p class="mb-0">
-                        Report Generated: {self.timestamp}
-                    </p>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Main Content -->
-    <div class="container">
-        
-        <!-- Table of Contents -->
-        <div class="row">
-            <div class="col-12">
-                <div class="toc">
-                    <h4 class="text-primary mb-3">
-                        <i class="fas fa-list"></i> Table of Contents
-                    </h4>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <ul class="list-unstyled">
-                                <li><a href="#executive-summary"><i class="fas fa-chart-line"></i> Executive Summary</a></li>
-                                <li><a href="#data-quality"><i class="fas fa-check-circle"></i> Data Quality Assessment</a></li>
-                                <li><a href="#response-analysis"><i class="fas fa-chart-bar"></i> Response Pattern Analysis</a></li>
-                                <li><a href="#ai-analysis"><i class="fas fa-robot"></i> AI-Powered Analysis</a></li>
-                            </ul>
-                        </div>
-                        <div class="col-md-6">
-                            <ul class="list-unstyled">
-                                <li><a href="#site-facility"><i class="fas fa-map-marker-alt"></i> Site & Facility Analysis</a></li>
-                                <li><a href="#timeline"><i class="fas fa-calendar-alt"></i> Timeline Analysis</a></li>
-                                <li><a href="#recommendations"><i class="fas fa-lightbulb"></i> Recommendations</a></li>
-                            </ul>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Executive Summary -->
-        <div id="executive-summary">
-            {executive_summary}
-        </div>
-        
-        <div class="section-divider"></div>
-
-        <!-- Data Quality Assessment -->
-        <div id="data-quality">
-            {data_quality}
-        </div>
-        
-        <div class="section-divider"></div>
-
-        <!-- Response Analysis -->
-        <div id="response-analysis">
-            {response_analysis}
-        </div>
-        
-        <div class="section-divider"></div>
-
-        <!-- Claude Analysis -->
-        <div id="ai-analysis">
-            {claude_analysis}
-        </div>
-        
-        <div class="section-divider"></div>
-
-        <!-- Site & Facility Analysis -->
-        <div id="site-facility">
-            {site_facility}
-        </div>
-        
-        <div class="section-divider"></div>
-
-        <!-- Timeline Analysis -->
-        <div id="timeline">
-            {timeline}
-        </div>
-        
-        <div class="section-divider"></div>
-
-        <!-- Recommendations -->
-        <div id="recommendations">
-            {recommendations}
-        </div>
-        
-        <!-- Footer -->
-        <div class="row mt-5">
-            <div class="col-12">
-                <div class="card bg-light">
-                    <div class="card-body text-center">
-                        <p class="mb-2">
-                            <strong>Report Information</strong>
-                        </p>
-                        <p class="mb-1">
-                            Generated on {self.timestamp} | 
-                            Total Records: {len(self.df):,} | 
-                            Data Range: {self.df['INSPECTION_DATE'].min().strftime('%Y-%m-%d') if 'INSPECTION_DATE' in self.df.columns else 'N/A'} to {self.df['INSPECTION_DATE'].max().strftime('%Y-%m-%d') if 'INSPECTION_DATE' in self.df.columns else 'N/A'}
-                        </p>
-                        <p class="mb-0 text-muted">
-                            This report was generated using automated data analysis and AI-powered insights.
-                        </p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Bootstrap JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
-    
-    <!-- Print functionality -->
-    <script>
-        function printReport() {{
-            window.print();
-        }}
-        
-        // Smooth scrolling for anchor links
-        document.querySelectorAll('a[href^="#"]').forEach(anchor => {{
-            anchor.addEventListener('click', function (e) {{
-                e.preventDefault();
-                document.querySelector(this.getAttribute('href')).scrollIntoView({{
-                    behavior: 'smooth'
-                }});
-            }});
-        }});
-    </script>
-</body>
-</html>
-        """
-        
-        # Save the HTML file
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        
-        print(f"✅ HTML report generated successfully!")
-        print(f"📄 Report saved as: {output_file}")
-        print(f"🌐 Open the file in a web browser to view the report")
-        
-        return output_file
-
-# Main execution function
-def generate_safety_inspection_html_report(df, claude_analysis=None, report_title=None, output_file=None):
-    """
-    Generate comprehensive HTML report for safety inspection analysis
-    
-    Args:
-        df: DataFrame with safety inspection data
-        claude_analysis: Results from Claude analysis (optional)
-        report_title: Custom title for the report
-        output_file: Custom output filename
-    
-    Returns:
-        Path to generated HTML file
-    """
-    
-    print("🚀 Starting HTML Report Generation...")
-    print("="*60)
-    
-    # Set default title if not provided
-    if report_title is None:
-        report_title = "Safety Inspection Analysis Report"
-    
-    # Initialize report generator
-    report_generator = SafetyAnalysisHTMLReportGenerator(
-        df=df,
-        claude_analysis=claude_analysis,
-        report_title=report_title
-    )
-    
-    # Generate the report
-    output_path = report_generator.generate_full_html_report(output_file)
-    
-    # Display summary
-    print(f"\n📊 Report Summary:")
-    print(f"   Title: {report_title}")
-    print(f"   Records analyzed: {len(df):,}")
-    print(f"   Report file: {output_path}")
-    print(f"   File size: {os.path.getsize(output_path) / 1024:.1f} KB")
-    
-    return output_path
-
-# Example usage with sample data
-def create_sample_report():
-    """Create a sample report for demonstration"""
-    
-    # Create sample data structure
-    sample_data = {
-        'INSPECTION_DATE': pd.date_range('2025-01-01', periods=100, freq='D'),
-        'AUTHOR_NAME': np.random.choice(['John Smith', 'Jane Doe', 'Mike Johnson'], 100),
-        'SITE_NAME': np.random.choice(['Endurance', 'Platform A', 'Platform B'], 100),
-        'FACILITY_AREA': np.random.choice(['Deck Storage', 'Main Deck', 'Drill Floor'], 100),
-        'RESPONSE': np.random.choice(['Effective', 'Ineffective'], 100),
-        'COMMENT': ['Sample inspection comment ' + str(i) for i in range(100)]
-    }
-    
-    sample_df = pd.DataFrame(sample_data)
-    
-    # Sample Claude analysis
-    sample_claude_analysis = """
-    **COMMON THEMES AND PATTERNS:**
-    
-    • **Equipment Maintenance** (Found in 34% of comments)
-      - "Equipment checks completed satisfactorily"
-      - "Maintenance schedules being followed"
-    
-    • **Training and Competency** (Found in 28% of comments)  
-      - "Personnel demonstrate adequate training"
-      - "Certification requirements met"
-    
-    **POSITIVE OBSERVATIONS:**
-    
-    • **Safety Compliance** (23% of comments)
-      - "All safety procedures followed correctly"
-      - "PPE usage is excellent"
-    
-    **COMMON ISSUES:**
-    
-    • **Documentation Gaps** (15% of comments)
-      - "Some paperwork incomplete"
-      - "Records need updating"
-    """
-    
-    # Generate report
-    output_file = generate_safety_inspection_html_report(
-        df=sample_df,
-        claude_analysis=sample_claude_analysis,
-        report_title="Sample Safety Inspection Report",
-        output_file="sample_safety_report.html"
-    )
-    
-    return output_file
-
-# Usage example
-if __name__ == "__main__":
-    
-    print("="*80)
-    print("SAFETY INSPECTION HTML REPORT GENERATOR")
-    print("="*80)
-    
-    try:
-        # Option 1: Load your actual data
-        # df = pd.read_csv("your_safety_inspection_data.csv")
-        # claude_results = {"analysis": "Your Claude analysis results here"}
-        # report_path = generate_safety_inspection_html_report(df, claude_results)
-        
-        # Option 2: Create sample report for demonstration
-        print("📊 Creating sample report for demonstration...")
-        sample_report = create_sample_report()
-        
-        print(f"\n✅ Sample report created: {sample_report}")
-        print("🌐 Open the HTML file in your web browser to view the report")
-        
-    except Exception as e:
-        print(f"❌ Error generating report: {e}")
-    
-    print("\n" + "="*80)
-    print("HTML REPORT FEATURES:")
-    print("="*80)
-    print("✅ Professional Bootstrap-based design")
-    print("✅ Interactive Plotly charts and visualizations")
-    print("✅ Responsive layout for all devices")
-    print("✅ Executive summary with key metrics")
-    print("✅ Data quality assessment with recommendations")
-    print("✅ Response pattern analysis with trends")
-    print("✅ AI-powered comment analysis integration") 
-    print("✅ Site and facility breakdown analysis")
-    print("✅ Timeline analysis with activity patterns")
-    print("✅ Actionable recommendations and next steps")
-    print("✅ Table of contents with smooth navigation")
-    print("✅ Print-friendly styling")
-    print("✅ Professional color scheme and typography")
-    print("\n🚀 Perfect for executive presentations and stakeholder reporting!")
